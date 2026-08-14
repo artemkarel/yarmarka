@@ -954,6 +954,11 @@ def profit_report(conn, date_from, date_to, share_pct):
         (date_from, date_to),
     ).fetchone()
     inventory_delta = float(inv["a"])
+    term = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) a, COALESCE(SUM(money),0) m FROM docs "
+        "WHERE type='incass' AND date BETWEEN ? AND ?",
+        (date_from, date_to),
+    ).fetchone()
     exp = expenses_list(conn, date_from, date_to)
     profit = revenue - cogs + inventory_delta - exp["total"]
     return {
@@ -962,6 +967,8 @@ def profit_report(conn, date_from, date_to, share_pct):
         "cogs": r2(cogs),
         "gross_profit": r2(revenue - cogs),
         "inventory_delta": r2(inventory_delta),
+        "terminal_raw": r2(float(term["a"])),
+        "terminal_credit": r2(-float(term["m"])),
         "expenses_total": exp["total"],
         "expenses_by_category": exp["by_category"],
         "net_profit": r2(profit),

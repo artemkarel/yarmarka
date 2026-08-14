@@ -997,9 +997,7 @@ async function S_analytics() {
   const p = periodDates(AN_STATE);
   const chips = periodChips(AN_STATE, S_analytics);
   const qs = 'date_from=' + p.from + '&date_to=' + p.to;
-  const [sales, onSellers] = await Promise.all([
-    api('/api/analytics/sales?' + qs), api('/api/analytics/on_sellers'),
-  ]);
+  const sales = await api('/api/analytics/sales?' + qs);
   let profitHtml = '';
   if (ME.role === 'admin' || ME.role === 'owner') {
     const pr = await api('/api/analytics/profit?' + qs);
@@ -1010,9 +1008,9 @@ async function S_analytics() {
       '<div class="bignum ' + (pr.net_profit >= 0 ? 'green' : 'red') + '">' +
       fmtM(pr.net_profit) + '</div>' +
       '<div class="sub hint" style="margin-bottom:8px">' + NF2.format(pr.margin_pct) +
-      '% от оборота • ' + NF2.format(pr.margin_of_revenue_pct) + '% от нашей выручки</div>' +
+      '% от оборота</div>' +
       row('Оборот (продано по рознице)', fmtM(pr.turnover)) +
-      row('Наша выручка (' + SETTINGS.share_pct + '%)', fmtM(pr.revenue)) +
+      row('Прошло по терминалу', fmtM(pr.terminal_raw)) +
       row('Себестоимость проданного', '− ' + fmtM(pr.cogs)) +
       row('Валовая прибыль', fmtM(pr.gross_profit)) +
       (Math.abs(pr.inventory_delta) > 0.005
@@ -1020,7 +1018,7 @@ async function S_analytics() {
             (pr.inventory_delta > 0 ? '+ ' : '− ') + fmtM(Math.abs(pr.inventory_delta)),
             pr.inventory_delta < 0 ? 'red' : 'green')
         : '') +
-      row('Расходы', '− ' + fmtM(pr.expenses_total), 'red') +
+      row('Дополнительные расходы', '− ' + fmtM(pr.expenses_total), 'red') +
       (pr.expenses_by_category.length
         ? '<div class="hint small" style="margin-top:6px">' +
           pr.expenses_by_category.map(c => esc(c.category) + ': ' + fmtM(c.amount)).join(' • ') +
@@ -1041,26 +1039,13 @@ async function S_analytics() {
       fmtQ(pp.qty, pp.unit) + ' • ' + fmtM(pp.value) + '</div></div>').join('') +
     '</div></details>').join('')
     : '<div class="hint small">Продаж за период нет</div>';
-  const onSellersHtml = onSellers.sellers.length ? onSellers.sellers.map(s =>
-    '<details class="doc"><summary><div class="dochead"><div><b>' + esc(s.name) + '</b></div>' +
-    '<div class="dt">' + fmtM(s.hands_value + s.shelf_value) + '</div></div>' +
-    '<div class="sub hint small">на руках ' + fmtM(s.hands_value) +
-    (s.shelf_value > 0 ? ' • полка ' + fmtM(s.shelf_value) : '') + '</div></summary>' +
-    '<div class="doclines small">' +
-    s.hands.map(h => '<div class="row small"><div class="l">🚚 ' + esc(h.name) + '</div>' +
-      '<div class="r">' + fmtQ(h.qty, h.unit) + '</div></div>').join('') +
-    s.shelf.map(h => '<div class="row small"><div class="l">🧺 ' + esc(h.name) + '</div>' +
-      '<div class="r">' + fmtQ(h.qty, h.unit) + '</div></div>').join('') +
-    '</div></details>').join('')
-    : '<div class="hint small">На продавцах товара нет</div>';
   const html = chips.html + profitHtml +
     '<div class="tiles">' +
     '<div class="tile"><div class="tl">Продано</div><div class="tv">' + fmtM(t.sold_value) + '</div></div>' +
     '<div class="tile"><div class="tl">Наша доля</div><div class="tv">' + fmtM(t.our_share) + '</div></div>' +
     '<div class="tile"><div class="tl">Терминал</div><div class="tv">' + fmtM(t.terminal_credit) + '</div></div>' +
     '</div>' +
-    '<div class="card"><h3>Продажи по продавцам</h3>' + sellersHtml + '</div>' +
-    '<div class="card"><h3>Товар на продавцах</h3>' + onSellersHtml + '</div>';
+    '<div class="card"><h3>Продажи по продавцам</h3>' + sellersHtml + '</div>';
   const el = screen('', html);
   chips.bind(el);
 }
