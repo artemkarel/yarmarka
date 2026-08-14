@@ -1,6 +1,7 @@
 """Телеграм-бот: /start с кнопкой мини-аппа и напоминания об инкассации в 20:00."""
 import asyncio
 import logging
+import threading
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,23 @@ import httpx
 from . import config, db, services
 
 log = logging.getLogger("bot")
+
+
+def send_sync(chat_id, text):
+    """Уведомление из API-обработчиков: отправляем в фоне, ошибки не роняют запрос."""
+    if not config.BOT_TOKEN or not chat_id:
+        return
+
+    def _go():
+        try:
+            httpx.post(
+                f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": text}, timeout=15,
+            )
+        except Exception as e:
+            log.warning("notify %s failed: %s", chat_id, e)
+
+    threading.Thread(target=_go, daemon=True).start()
 
 REMIND_TEXT = (
     "⏰ Не забудь про инкассацию за сегодня!\n\n"

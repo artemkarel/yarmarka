@@ -361,6 +361,14 @@ def doc_prihod(conn, user, date, lines, comment=None, supplier_id=None):
         for ln in lines:
             p = _product(conn, ln.get("product_id"))
             qty = _num(ln.get("qty"), p["name"])
+            # новая себестоимость в строке обновляет цену товара; иначе остаётся старая
+            if ln.get("purchase_price") is not None:
+                pp = _num(ln.get("purchase_price"), f"Себестоимость: {p['name']}",
+                          allow_zero=True)
+                if abs(pp - p["purchase_price"]) > EPS:
+                    conn.execute("UPDATE products SET purchase_price=? WHERE id=?",
+                                 (pp, p["id"]))
+                p["purchase_price"] = pp
             _stock_set(conn, p["id"], _stock_qty(conn, p["id"]) + qty)
             _line_insert(conn, doc_id, p, qty=qty)
             total += qty * p["retail_price"]
@@ -974,6 +982,39 @@ def profit_report(conn, date_from, date_to, share_pct):
         "net_profit": r2(profit),
         "margin_pct": r2(profit / turnover * 100.0) if turnover > EPS else 0.0,
         "margin_of_revenue_pct": r2(profit / revenue * 100.0) if revenue > EPS else 0.0,
+    }
+
+
+def products_report(conn, date_from, date_to, share_pct):
+    """Управленческая аналитика по товарам: продано, оборот, наша доля, заработок."""
+    _date_ok(date_from)
+    _date_ok(date_to)
+    rows = []
+    t_qty_kg = t_val = t_profit = 0.0
+    for r in conn.execute(
+        "SELECT p.id, p.name, p.unit, COALESCE(SUM(l.qty_sold),0) qty, "
+        "COALESCE(SUM(l.qty_sold * l.retail_price),0) val, "
+        "COALESCE(SUM(l.qty_sold * l.purchase_price),0) cogs "
+        "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
+        "JOIN products p ON p.id = l.product_id "
+        "WHERE d.type='sdacha' AND d.date BETWEEN ? AND ? AND l.qty_sold > ? "
+        "GROUP BY p.id ORDER BY val DESC",
+        (date_from, date_to, EPS),
+    ):
+        share = float(r["val"]) * share_pct / 100.0
+        profit = share - float(r["cogs"])
+        rows.append({
+            "product_id": r["id"], "name": r["name"], "unit": r["unit"],
+            "qty": r2(r["qty"]), "sold_value": r2(r["val"]), "cogs": r2(r["cogs"]),
+            "our_share": r2(share), "profit": r2(profit),
+        })
+        if r["unit"] == "кг":
+            t_qty_kg += r["qty"]
+        t_val += r["val"]
+        t_profit += profit
+    return {
+        "products": rows,
+        "totals": {"kg": r2(t_qty_kg), "sold_value": r2(t_val), "profit": r2(t_profit)},
     }
 
 

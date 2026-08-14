@@ -88,13 +88,19 @@ function render() {
   top.fn.apply(null, top.args);
   if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
 }
+let RESTORE_Y = null; // прокрутка, которую надо вернуть после «назад»
+
 function push(fn) {
+  // запоминаем, где стоял пользователь, чтобы вернуть его на то же место
+  if (stack.length) stack[stack.length - 1].scrollY = window.scrollY || 0;
   stack.push({ fn, args: Array.prototype.slice.call(arguments, 1) });
   ANIM = 'push';
   render();
 }
+let backBusy = false;
 function back() {
-  if (stack.length < 2) return;
+  if (backBusy || stack.length < 2) return;
+  backBusy = true;
   const sc = document.getElementById('screen');
   sc.style.transition = 'transform .2s ease, opacity .2s ease';
   sc.style.transform = 'translateX(100%)';
@@ -104,12 +110,24 @@ function back() {
     sc.style.transform = '';
     sc.style.opacity = '';
     stack.pop();
+    RESTORE_Y = stack[stack.length - 1].scrollY || 0;
     ANIM = 'backin';
     render();
+    backBusy = false;
   }, 190);
 }
 window.back = back;
 if (tg) tg.BackButton.onClick(back);
+
+// клавиатура не должна мешать: прокрутка списка или Enter закрывают её
+document.addEventListener('touchmove', e => {
+  const a = document.activeElement;
+  if (a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && e.target !== a) a.blur();
+}, { passive: true });
+document.addEventListener('keydown', e => {
+  const a = document.activeElement;
+  if (e.key === 'Enter' && a && a.tagName === 'INPUT') a.blur();
+});
 
 function setTab(fn, idx) {
   stack = [{ fn, args: [] }];
@@ -121,19 +139,28 @@ function setTab(fn, idx) {
 }
 
 function screen(title, html, sub) {
-  const el = document.getElementById('screen');
+  // пересоздаём контейнер: старые обработчики уходят вместе с прежним узлом,
+  // иначе они копятся и каждый тап срабатывает по несколько раз
+  const old = document.getElementById('screen');
+  const el = old.cloneNode(false);
+  old.replaceWith(el);
   const head = sub
     ? '<div class="subhead"><button class="backbtn" onclick="back()">‹</button>' +
       '<div class="subtitle">' + esc(title) + '</div></div>'
     : (title ? '<div class="pagetitle">' + esc(title) + '</div>' : '');
   el.innerHTML = head + html;
-  el.classList.remove('anim-push', 'anim-backin', 'anim-tab');
   if (ANIM) {
     void el.offsetWidth;
     el.classList.add('anim-' + ANIM);
     ANIM = null;
   }
-  window.scrollTo(0, 0);
+  if (RESTORE_Y != null) {
+    const y = RESTORE_Y;
+    RESTORE_Y = null;
+    requestAnimationFrame(() => window.scrollTo(0, y));
+  } else {
+    window.scrollTo(0, 0);
+  }
   return el;
 }
 
@@ -149,15 +176,18 @@ function screen(title, html, sub) {
     const speed = dt > 0 ? dx / dt : 0; // px/ms
     t0 = null;
     const ok = dx > 70 || (dx > 30 && speed > 0.45);
-    if (ok) {
+    if (ok && !backBusy) {
+      backBusy = true;
       el.style.transition = 'transform .16s ease';
       el.style.transform = 'translateX(100%)';
       setTimeout(() => {
         el.style.transition = '';
         el.style.transform = '';
         stack.pop();
+        RESTORE_Y = stack[stack.length - 1].scrollY || 0;
         ANIM = 'backin';
         render();
+        backBusy = false;
         if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
       }, 150);
     } else {
@@ -169,11 +199,13 @@ function screen(title, html, sub) {
 
   document.addEventListener('touchstart', e => {
     t0 = null;
-    if (stack.length < 2) return;
-    // не мешаем горизонтальным лентам (календарь, чипсы)
-    if (e.target.closest('.dstrip, .chips, input, select, textarea')) return;
+    if (stack.length < 2 || backBusy) return;
+    // горизонтальным лентам (календарь, чипсы) не мешаем
+    if (e.target.closest('.dstrip, .chips')) return;
     const t = e.touches[0];
-    if (t.clientX <= 64) {
+    // жест — строго от левой кромки экрана, поверх любых элементов;
+    // обычный тап не страдает: жест включается только после уверенного сдвига
+    if (t.clientX <= 32) {
       t0 = { x: t.clientX, y: t.clientY, drag: false, dead: false, dx: 0, t: Date.now() };
     }
   }, { passive: true });
@@ -183,8 +215,10 @@ function screen(title, html, sub) {
     const t = e.touches[0];
     const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
     if (!t0.drag) {
-      if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { t0.dead = true; return; }
-      if (dx > 6) t0.drag = true;
+      if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { t0.dead = true; return; }
+      // жест признаём только при уверенном горизонтальном движении,
+      // чтобы обычный тап с лёгким сдвигом пальца оставался кликом
+      if (dx > 16 && dx > Math.abs(dy) * 1.3) t0.drag = true;
       else return;
     }
     if (e.cancelable) e.preventDefault(); // жест наш — не отдаём его прокрутке
@@ -216,10 +250,10 @@ function buildNav() {
              ['📍', 'Точки', S_places], ['📊', 'Аналитика', S_turnover],
              ['⋯', 'Ещё', S_more]];
   } else if (ME.role === 'keeper') {
-    items = [['📦', 'Склад', S_sklad], ['👥', 'Продавцы', S_sellers],
+    items = [['📦', 'Склад', S_sklad], ['🤝', 'Реализация', S_sellers],
              ['📊', 'Аналитика', S_analytics], ['⋯', 'Ещё', S_more]];
   } else {
-    items = [['📦', 'Склад', S_sklad], ['👥', 'Продавцы', S_sellers], ['📍', 'Точки', S_places],
+    items = [['📦', 'Склад', S_sklad], ['🤝', 'Реализация', S_sellers], ['📍', 'Точки', S_places],
              ['📊', 'Аналитика', S_analytics], ['⋯', 'Ещё', S_more]];
   }
   const nav = document.getElementById('nav');
@@ -235,12 +269,17 @@ function buildNav() {
 
 // ===== общие блоки =====
 function balanceHtml(b, self) {
+  // нам должны — зелёным, мы должны — красным
   let big, cls;
-  if (b.balance > 0.005) { big = (self ? 'Ты должен' : 'Должен нам'); cls = 'red'; }
-  else if (b.balance < -0.005) { big = (self ? 'Тебе должны' : 'Мы должны ему'); cls = 'green'; }
-  else { big = 'Расчёт закрыт'; cls = ''; }
-  const row = (l, v) => '<div class="row"><div class="l hint">' + l +
-    '</div><div class="r val">' + v + '</div></div>';
+  if (b.balance > 0.005) {
+    big = self ? 'Ты должен компании' : 'Должен компании';
+    cls = 'green';
+  } else if (b.balance < -0.005) {
+    big = self ? 'Компания должна тебе' : 'Компания должна';
+    cls = 'red';
+  } else { big = 'Расчёт закрыт'; cls = ''; }
+  const row = (l, v, c) => '<div class="row"><div class="l hint">' + l +
+    '</div><div class="r val ' + (c || '') + '">' + v + '</div></div>';
   return '<div class="card">' +
     '<div class="biglabel">' + big + '</div>' +
     '<div class="bignum ' + cls + '">' + fmtM(Math.abs(b.balance)) + '</div>' +
@@ -250,7 +289,11 @@ function balanceHtml(b, self) {
     row('Начислено (' + SETTINGS.share_pct + '%)', '+ ' + fmtM(b.charged)) +
     row('Возврат товара', '− ' + fmtM(b.returned_credit)) +
     row('Терминал (пробито ' + fmtM(b.terminal_raw) + ')', '− ' + fmtM(b.terminal_credit)) +
-    row('Наличными', (b.cash_total >= 0 ? '− ' + fmtM(b.cash_total) : '+ ' + fmtM(-b.cash_total))) +
+    (Math.abs(b.cash_total) > 0.005
+      ? row('Наличными', (b.cash_total >= 0 ? '− ' : '+ ') + fmtM(Math.abs(b.cash_total)))
+      : '') +
+    '<div class="row total"><div class="l">' + big + '</div><div class="r ' + cls + '">' +
+    fmtM(Math.abs(b.balance)) + '</div></div>' +
     '</div></div>';
 }
 
@@ -275,11 +318,11 @@ const DOC_META = {
 };
 
 // единый стиль меню: карточка со строками «иконка название ›»
-function menuRows(items) {
-  return '<div class="card" style="padding:4px 14px">' + items.map(it =>
-    '<div class="row" data-menu="' + it[0] + '" style="cursor:pointer">' +
-    '<div class="l name">' + it[1] + '  ' + it[2] + '</div>' +
-    '<div class="r hint">›</div></div>').join('') + '</div>';
+function menuTiles(items) {
+  return '<div class="tilemenu">' + items.map(it =>
+    '<button class="tilebtn" data-menu="' + it[0] + '"' +
+    (it[3] ? ' style="grid-column:span 2"' : '') + '><span class="tico">' + it[1] +
+    '</span>' + it[2] + '</button>').join('') + '</div>';
 }
 
 function bindMenu(el, handlers) {
@@ -292,14 +335,14 @@ function bindMenu(el, handlers) {
 function docCard(d, showSeller) {
   const meta = DOC_META[d.type] || ['📄', d.type];
   let sum = '';
-  if (d.type === 'prihod') sum = 'на ' + fmtM(d.amount) + ' по рознице' +
+  if (d.type === 'prihod') sum = 'на ' + fmtM(d.amount) + ' по ценам продажи' +
     (d.supplier_name ? ' • ' + esc(d.supplier_name) : '');
   else if (d.type === 'vydacha') sum = fmtM(d.amount) + ' • долг +' + fmtM(d.money);
   else if (d.type === 'sdacha') sum = 'продано на ' + fmtM(d.amount) + ' • зачтено ' + fmtM(-d.money);
   else if (d.type === 'incass') sum = 'терминал ' + fmtM(d.amount) + ' → зачёт ' + fmtM(-d.money);
   else if (d.type === 'cash') sum = d.amount >= 0
     ? 'получено ' + fmtM(d.amount) : 'выдано продавцу ' + fmtM(-d.amount);
-  else if (d.type === 'inventory') sum = 'результат ' + fmtM(d.amount) + ' по закупу';
+  else if (d.type === 'inventory') sum = 'результат ' + fmtM(d.amount) + ' по себестоимости';
   else if (d.type === 'initial') sum = 'введены остатки';
   const who = (showSeller && d.seller_name) ? esc(d.seller_name) + ' • ' : '';
   return '<details class="doc" ontoggle="onDocToggle(event,' + d.id + ')">' +
@@ -346,8 +389,27 @@ function docLinesHtml(doc) {
       txt = esc(l.name) + ': ' + parts.join(', ');
     }
     return '<div class="row small">' + txt + '</div>';
-  }).join('');
+  }).join('') +
+  (doc.type === 'inventory'
+    ? '<div style="padding:8px 0"><button class="chip" onclick="openInvReport(' + doc.id +
+      ')">📑 Отчёт о расхождениях</button></div>' : '') +
+  (doc.type === 'vydacha' && doc.print_url
+    ? '<div style="padding:8px 0"><button class="chip" data-print="' + esc(doc.print_url) +
+      '">🖨 УПД — печать / PDF</button></div>' : '');
 }
+
+window.openInvReport = id => push(S_invReport, id);
+
+function openExternal(url) {
+  const abs = location.origin + url;
+  if (tg && tg.openLink) tg.openLink(abs);
+  else window.open(abs, '_blank');
+}
+
+document.addEventListener('click', e => {
+  const pr = e.target.closest('[data-print]');
+  if (pr) { e.preventDefault(); openExternal(pr.dataset.print); }
+});
 
 // живой поиск товара: печатаешь название — снизу предлагаются позиции
 function attachProductSearch(el, products, opts) {
@@ -555,37 +617,50 @@ async function S_sklad() {
         esc(p.group_name || 'Без группы') + '</div>';
     }
     rows += '<div class="row"><div class="l"><div class="name">' + esc(p.name) + '</div>' +
-      '<div class="sub">' + fmtQ(p.qty, p.unit) + ' • закуп ' + fmtM(p.purchase_value) +
+      '<div class="sub">' + fmtQ(p.qty, p.unit) + ' • себестоимость ' + fmtM(p.purchase_value) +
       '</div></div><div class="r val">' + fmtM(p.retail_value) + '</div></div>';
   });
-  const shelf = r.shelf_rows.length
-    ? '<div class="card"><h3>🧺 На полках продавцов</h3>' + r.shelf_rows.map(s =>
-      '<div class="row"><div class="l">' + esc(s.name) + '</div><div class="r val">' +
-      fmtQ(s.qty, s.unit) + '</div></div>').join('') + '</div>'
+  const onSellers = await api('/api/analytics/on_sellers');
+  const shelfSellers = onSellers.sellers.filter(s => s.shelf.length);
+  const shelf = shelfSellers.length
+    ? '<div class="card"><h3>🧺 На полках продавцов</h3>' + shelfSellers.map((s, i) =>
+      '<details class="doc"><summary><div class="dochead"><div><b>' + (i + 1) + '. ' +
+      esc(s.name) + '</b></div><div class="dt">' + fmtM(s.shelf_value) + '</div></div>' +
+      '<div class="sub hint small">' + fmtQ(
+        s.shelf.reduce((a, x) => a + (x.unit === 'кг' ? x.qty : 0), 0), 'кг') +
+      ' • позиций: ' + s.shelf.length + '</div></summary>' +
+      '<div class="doclines small">' + s.shelf.map(h =>
+        '<div class="row small"><div class="l">' + esc(h.name) + '</div><div class="r">' +
+        fmtQ(h.qty, h.unit) + ' • ' + fmtM(h.value) + '</div></div>').join('') +
+      '</div></details>').join('') + '</div>'
     : '';
   const html =
-    menuRows([
-      ['prihod', '📥', 'Поступление товара'],
-      ['vydat', '🚚', 'Выдача товара продавцу'],
-      ['priem', '📤', 'Приём товара от продавца'],
+    menuTiles([
+      ['prihod', '📥', 'Поступление товара', true],
       ['inv', '🔍', 'Инвентаризация'],
       ['init', '📋', 'Начальные остатки'],
     ]) +
     '<div class="tiles">' +
     '<div class="tile"><div class="tl">Всего кг</div><div class="tv">' + NF3.format(t.kg) + '</div></div>' +
-    '<div class="tile"><div class="tl">Закупка</div><div class="tv">' + fmtM(t.purchase_value) + '</div></div>' +
-    '<div class="tile"><div class="tl">Розница</div><div class="tv">' + fmtM(t.retail_value) + '</div></div>' +
+    '<div class="tile"><div class="tl">Себестоимость</div><div class="tv">' + fmtM(t.purchase_value) + '</div></div>' +
+    '<div class="tile"><div class="tl">Сумма продажи</div><div class="tv">' + fmtM(t.retail_value) + '</div></div>' +
     '</div>' +
+    '<div class="field"><input id="sk-q" placeholder="🔍 Поиск по остаткам…"></div>' +
     '<div class="card"><h3>Остатки на складе</h3>' +
-    (rows || '<div class="hint small">Склад пуст. Добавь приход или начальные остатки.</div>') +
+    (rows || '<div class="hint small">Склад пуст. Добавь поступление или начальные остатки.</div>') +
     '</div>' + shelf;
   const el = screen('', html);
   bindMenu(el, {
     prihod: () => push(S_prihod),
-    vydat: () => push(S_chooseSeller, 'vydacha'),
-    priem: () => push(S_chooseSeller, 'sdacha'),
     inv: () => push(S_countSheet, 'inventory'),
     init: () => push(S_countSheet, 'initial'),
+  });
+  el.querySelector('#sk-q').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase().trim();
+    el.querySelectorAll('.skrow').forEach(row => {
+      row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
+    });
+    el.querySelectorAll('.skgroup').forEach(g => { g.style.display = q ? 'none' : ''; });
   });
 }
 
@@ -623,45 +698,50 @@ async function S_prihod() {
     '<div class="grid2" style="margin-bottom:10px">' +
     '<div class="field" style="margin:0"><label>Дата</label>' +
     '<input type="date" id="pr-date" value="' + today() + '"></div>' +
-    '<div class="field" style="margin:0"><label>Поставщик</label><select id="pr-sup">' +
-    '<option value="">— не указан —</option>' +
-    sup.map(s => '<option value="' + s.id + '">' + esc(s.name) + '</option>').join('') +
-    '</select></div></div>' +
+    '<div class="field" style="margin:0"><label>Поставщик</label>' +
+    '<input id="pr-sup" list="pr-sup-dl" placeholder="Поиск или выбор…" autocomplete="off">' +
+    '<datalist id="pr-sup-dl">' +
+    sup.map(s => '<option value="' + esc(s.name) + '">').join('') + '</datalist></div></div>' +
     productSearchHtml('pr-search', 'pr-sug') +
     '<div id="pr-lines"></div>' +
+    '<button class="chip" id="pr-more" hidden style="margin-bottom:10px">+ Добавить строку</button>' +
     '<div class="card" id="pr-total" hidden></div>' +
     '<button class="btn" id="pr-save">Провести поступление</button>';
   const el = screen('Поступление товара', html, true);
   const linesEl = el.querySelector('#pr-lines');
 
   const totals = () => {
-    let pv = 0, rv = 0, any = false;
+    let pv = 0, any = false;
     lines.forEach(l => {
       const q = pnum(l.qty);
-      if (q > 0) { any = true; pv += q * l.product.purchase_price; rv += q * l.product.retail_price; }
+      if (q > 0) { any = true; pv += q * pnum(l.price); }
     });
     const tEl = el.querySelector('#pr-total');
     tEl.hidden = !any;
-    tEl.innerHTML = '<div class="row"><div class="l hint">По закупке</div><div class="r val">' +
-      fmtM(pv) + '</div></div><div class="row"><div class="l hint">По рознице</div>' +
-      '<div class="r val">' + fmtM(rv) + '</div></div>';
+    tEl.innerHTML = '<div class="row"><div class="l hint">Итого по себестоимости</div>' +
+      '<div class="r val">' + fmtM(pv) + '</div></div>';
+    el.querySelector('#pr-more').hidden = !lines.length;
   };
   const draw = () => {
     linesEl.innerHTML = lines.map((l, i) =>
       '<div class="line"><div class="linehead"><div style="flex:1"><div class="name">' +
-      esc(l.product.name) + '</div><div class="sub hint small">закуп ' +
-      fmtM(l.product.purchase_price) + ' • розница ' + fmtM(l.product.retail_price) + '</div></div>' +
+      (i + 1) + '. ' + esc(l.product.name) + '</div>' +
+      '<div class="sub hint small">себестоимость ' + fmtM(l.product.purchase_price) +
+      '</div></div>' +
       '<button class="rm" data-i="' + i + '">✕</button></div>' +
+      '<div class="grid2">' +
+      '<div class="field" style="margin:0"><label>Себестоимость, ₽/' + l.product.unit +
+      '</label><input inputmode="decimal" class="pin" data-i="' + i + '" value="' +
+      esc(l.price) + '"></div>' +
       '<div class="field" style="margin:0"><label>Количество, ' + l.product.unit + '</label>' +
       '<input inputmode="decimal" class="qin" data-i="' + i + '" value="' + esc(l.qty) + '"></div>' +
-      '</div>').join('');
+      '</div></div>').join('');
     totals();
   };
   linesEl.addEventListener('input', e => {
-    if (e.target.classList.contains('qin')) {
-      lines[+e.target.dataset.i].qty = e.target.value;
-      totals();
-    }
+    const i = +e.target.dataset.i;
+    if (e.target.classList.contains('qin')) { lines[i].qty = e.target.value; totals(); }
+    if (e.target.classList.contains('pin')) { lines[i].price = e.target.value; totals(); }
   });
   linesEl.addEventListener('click', e => {
     const rm = e.target.closest('.rm');
@@ -669,21 +749,41 @@ async function S_prihod() {
   });
   attachProductSearch(el, products, {
     input: 'pr-search', box: 'pr-sug',
-    sub: p => 'остаток ' + fmtQ(p.stock_qty, p.unit) + ' • закуп ' + fmtM(p.purchase_price),
+    sub: p => 'остаток ' + fmtQ(p.stock_qty, p.unit) + ' • себестоимость ' +
+      fmtM(p.purchase_price),
     pick: p => {
       if (lines.some(l => l.product.id === p.id)) return toast('Уже в списке');
-      lines.push({ product: p, qty: '' });
+      lines.push({ product: p, qty: '', price: String(p.purchase_price || '') });
       draw();
     },
   });
+  el.querySelector('#pr-more').onclick = () => {
+    const s = el.querySelector('#pr-search');
+    s.scrollIntoView({ block: 'center' });
+    s.focus();
+  };
   el.querySelector('#pr-save').onclick = async () => {
-    const out = lines.map(l => ({ product_id: l.product.id, qty: pnum(l.qty) }))
-      .filter(l => l.qty > 0);
+    const out = lines.map(l => ({
+      product_id: l.product.id, qty: pnum(l.qty), purchase_price: pnum(l.price),
+    })).filter(l => l.qty > 0);
     if (!out.length) return toast('Добавь позиции и количество');
+    // поставщик: ищем по имени, при новом имени предлагаем создать
+    let supplierId;
+    const supName = el.querySelector('#pr-sup').value.trim();
+    if (supName) {
+      const found = sup.find(s => s.name.toLowerCase() === supName.toLowerCase());
+      if (found) supplierId = found.id;
+      else {
+        if (!(await confirmDlg('Добавить нового поставщика «' + supName + '»?'))) return;
+        try {
+          supplierId = (await api('/api/suppliers', 'POST', { name: supName })).supplier.id;
+        } catch (e) { return toast(e.message); }
+      }
+    }
     try {
       await api('/api/docs/prihod', 'POST', {
         date: el.querySelector('#pr-date').value,
-        supplier_id: +el.querySelector('#pr-sup').value || undefined,
+        supplier_id: supplierId,
         lines: out,
       });
       toast('Поступление проведено ✓', true);
@@ -728,11 +828,17 @@ async function S_countSheet(kind) {
     const ok = await confirmDlg('Записать ' + lines.length + ' позиц.?');
     if (!ok) return;
     try {
-      await api('/api/docs/' + kind, 'POST',
+      const r = await api('/api/docs/' + kind, 'POST',
         { date: el.querySelector('#cs-date').value, lines });
       toast(isInv ? 'Инвентаризация проведена ✓' : 'Остатки сохранены ✓', true);
       PRODUCTS_CACHE = null;
-      back();
+      if (isInv) {
+        // сразу показываем отчёт о расхождениях; «назад» вернёт на склад
+        stack.pop();
+        push(S_invReport, r.doc.id);
+      } else {
+        back();
+      }
     } catch (e) { toast(e.message); }
   };
 }
@@ -742,14 +848,14 @@ async function S_sellers() {
   const r = await api('/api/sellers');
   const html = r.sellers.length ? r.sellers.map(s => {
     const bal = s.balance > 0.005
-      ? '<span class="red">должен ' + fmtM(s.balance) + '</span>'
+      ? '<span class="green">должен за товар ' + fmtM(s.balance) + '</span>'
       : s.balance < -0.005
-        ? '<span class="green">мы должны ' + fmtM(-s.balance) + '</span>'
-        : '<span class="hint">расчёт 0 ₽</span>';
+        ? '<span class="red">компания должна ' + fmtM(-s.balance) + '</span>'
+        : '<span class="hint">должен за товар 0 ₽</span>';
     return '<div class="card" data-sid="' + s.id + '" style="cursor:pointer">' +
       '<div class="row" style="border:none;padding:2px 0"><div class="l">' +
       '<div class="name">' + esc(s.name) + '</div>' +
-      '<div class="sub">на руках на ' + fmtM(s.hands_value) +
+      '<div class="sub">Товара на руках на ' + fmtM(s.hands_value) +
       (s.shelf_value > 0 ? ' • полка ' + fmtM(s.shelf_value) : '') + '</div></div>' +
       '<div class="r">' + bal + '</div></div></div>';
   }).join('')
@@ -764,15 +870,18 @@ async function S_sellers() {
 async function S_seller(sid) {
   const r = await api('/api/sellers/' + sid);
   const admin = ME.role === 'admin' || ME.role === 'owner';
+  const bal = r.balance.balance;
+  const settleBtn = admin && Math.abs(bal) > 0.005
+    ? '<button class="btn secondary" id="a-settle">💵 Рассчитаться наличными: ' +
+      (bal > 0 ? 'получить ' : 'выдать ') + fmtM(Math.abs(bal)) + '</button>'
+    : '';
   const html =
     balanceHtml(r.balance, false) +
     '<div class="btnrow">' +
     '<button class="btn" id="a-vyd">🚚 Выдать товар</button>' +
-    '<button class="btn" id="a-sd">↩️ Принять сдачу</button></div>' +
-    '<div class="btnrow">' +
-    '<button class="btn secondary" id="a-inc">💳 Инкассация</button>' +
-    (admin ? '<button class="btn secondary" id="a-cash">💵 Наличный расчёт</button>'
-           : '<div></div>') + '</div>' +
+    '<button class="btn" id="a-sd">↩️ Принять товар</button></div>' +
+    '<button class="btn secondary" id="a-inc">💳 Внести инкассацию</button>' +
+    settleBtn +
     stockListHtml(r.stock.hands, '🚚 На руках') +
     stockListHtml(r.stock.shelf, '🧺 На полке') +
     '<div class="card"><h3>Последние операции</h3>' +
@@ -782,7 +891,19 @@ async function S_seller(sid) {
   el.querySelector('#a-vyd').onclick = () => push(S_vydacha, sid);
   el.querySelector('#a-sd').onclick = () => push(S_sdacha, sid);
   el.querySelector('#a-inc').onclick = () => push(S_incass, sid);
-  if (admin) el.querySelector('#a-cash').onclick = () => push(S_cash, sid, r.balance.balance);
+  const settle = el.querySelector('#a-settle');
+  if (settle) settle.onclick = async () => {
+    const msg = bal > 0
+      ? 'Получить от продавца наличными ' + fmtM(bal) + ' и закрыть расчёт?'
+      : 'Выдать продавцу наличными ' + fmtM(-bal) + ' и закрыть расчёт?';
+    if (!(await confirmDlg(msg))) return;
+    try {
+      // сумма формируется автоматически из текущего баланса
+      await api('/api/docs/cash', 'POST', { seller_id: sid, amount: bal });
+      toast('Расчёт закрыт ✓', true);
+      render();
+    } catch (e) { toast(e.message); }
+  };
 }
 
 async function S_vydacha(sid) {
@@ -809,7 +930,7 @@ async function S_vydacha(sid) {
     const tEl = el.querySelector('#v-total');
     tEl.hidden = !any;
     tEl.innerHTML =
-      '<div class="row"><div class="l hint">Товара по рознице</div><div class="r val">' +
+      '<div class="row"><div class="l hint">Товара по ценам продажи</div><div class="r val">' +
       fmtM(sum) + '</div></div>' +
       '<div class="row"><div class="l hint">Долг (+' + SETTINGS.share_pct + '%)</div>' +
       '<div class="r val red">+ ' + fmtM(sum * SETTINGS.share_pct / 100) + '</div></div>';
@@ -866,6 +987,10 @@ async function S_vydacha(sid) {
         { seller_id: sid, date: el.querySelector('#v-date').value, lines: out });
       toast('Выдано на ' + fmtM(r.doc.amount) + ', долг +' + fmtM(r.doc.money), true);
       PRODUCTS_CACHE = null;
+      if (r.doc.print_url &&
+          await confirmDlg('Открыть УПД для печати или сохранения в PDF?')) {
+        openExternal(r.doc.print_url);
+      }
       back();
     } catch (e) { toast(e.message); }
   };
@@ -997,7 +1122,10 @@ async function S_analytics() {
   const p = periodDates(AN_STATE);
   const chips = periodChips(AN_STATE, S_analytics);
   const qs = 'date_from=' + p.from + '&date_to=' + p.to;
-  const sales = await api('/api/analytics/sales?' + qs);
+  const [sales, prodRep] = await Promise.all([
+    api('/api/analytics/sales?' + qs), api('/api/analytics/products?' + qs),
+  ]);
+  const ownerish = ME.role === 'admin' || ME.role === 'owner';
   let profitHtml = '';
   if (ME.role === 'admin' || ME.role === 'owner') {
     const pr = await api('/api/analytics/profit?' + qs);
@@ -1009,7 +1137,7 @@ async function S_analytics() {
       fmtM(pr.net_profit) + '</div>' +
       '<div class="sub hint" style="margin-bottom:8px">' + NF2.format(pr.margin_pct) +
       '% от оборота</div>' +
-      row('Оборот (продано по рознице)', fmtM(pr.turnover)) +
+      row('Оборот (продано по ценам продажи)', fmtM(pr.turnover)) +
       row('Прошло по терминалу', fmtM(pr.terminal_raw)) +
       row('Себестоимость проданного', '− ' + fmtM(pr.cogs)) +
       row('Валовая прибыль', fmtM(pr.gross_profit)) +
@@ -1039,19 +1167,85 @@ async function S_analytics() {
       fmtQ(pp.qty, pp.unit) + ' • ' + fmtM(pp.value) + '</div></div>').join('') +
     '</div></details>').join('')
     : '<div class="hint small">Продаж за период нет</div>';
+  const prods = ownerish
+    ? [...prodRep.products].sort((a, b) => b.profit - a.profit)
+    : prodRep.products;
+  const prodHtml = prods.length ? prods.map((pp, i) =>
+    '<div class="row"><div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' +
+    esc(pp.name) + '</div><div class="sub">' + fmtQ(pp.qty, pp.unit) + ' • продано ' +
+    fmtM(pp.sold_value) +
+    (ownerish ? ' • доля ' + fmtM(pp.our_share) : '') + '</div></div>' +
+    '<div class="r">' + (ownerish
+      ? '<div class="val ' + (pp.profit >= 0 ? 'green' : 'red') + '">' + fmtM(pp.profit) +
+        '</div><div class="sub hint">заработали</div>'
+      : '<div class="val">' + fmtM(pp.sold_value) + '</div>') + '</div></div>').join('') +
+    '<div class="row total"><div class="l">Итого: ' + fmtQ(prodRep.totals.kg, 'кг') +
+    '</div><div class="r">' + fmtM(ownerish ? prodRep.totals.profit : prodRep.totals.sold_value) +
+    '</div></div>'
+    : '<div class="hint small">Продаж за период нет</div>';
   const html = chips.html + profitHtml +
     '<div class="tiles">' +
     '<div class="tile"><div class="tl">Продано</div><div class="tv">' + fmtM(t.sold_value) + '</div></div>' +
     '<div class="tile"><div class="tl">Наша доля</div><div class="tv">' + fmtM(t.our_share) + '</div></div>' +
     '<div class="tile"><div class="tl">Терминал</div><div class="tv">' + fmtM(t.terminal_credit) + '</div></div>' +
     '</div>' +
-    '<div class="card"><h3>Продажи по продавцам</h3>' + sellersHtml + '</div>';
+    '<div class="card"><h3>Продажи по продавцам</h3>' + sellersHtml + '</div>' +
+    '<div class="card"><h3>📈 Аналитика по товарам</h3>' + prodHtml + '</div>';
   const el = screen('', html);
   chips.bind(el);
 }
 
+// ===== отчёты =====
+async function S_reports() {
+  const r = await api('/api/docs?type=inventory&limit=100');
+  const html = r.docs.length
+    ? '<div class="card">' + r.docs.map((d, i) =>
+      '<div class="row" data-rep="' + d.id + '" style="cursor:pointer">' +
+      '<div class="l"><div class="name small">' + (i + 1) + '. Инвентаризация от ' +
+      dstr(d.date) + '</div><div class="sub">' + esc(d.creator_name || '') + '</div></div>' +
+      '<div class="r val ' + (d.amount < -0.005 ? 'red' : d.amount > 0.005 ? 'green' : 'hint') +
+      '">' + fmtM(d.amount) + '</div></div>').join('') + '</div>'
+    : '<div class="card hint">Отчётов пока нет — проведи инвентаризацию, и здесь появится ' +
+      'отчёт о расхождениях.</div>';
+  const el = screen('Отчёты', html, true);
+  el.addEventListener('click', e => {
+    const c = e.target.closest('[data-rep]');
+    if (c) push(S_invReport, +c.dataset.rep);
+  });
+}
+
+async function S_invReport(docId) {
+  const d = (await api('/api/docs/' + docId)).doc;
+  const diffs = d.lines.map(l => ({
+    name: l.name, unit: l.unit,
+    before: l.qty_before || 0, fact: l.qty,
+    diff: l.qty - (l.qty_before || 0),
+    money: (l.qty - (l.qty_before || 0)) * l.purchase_price,
+  })).filter(x => Math.abs(x.diff) > 0.0005);
+  let shortage = 0, surplus = 0;
+  diffs.forEach(x => { if (x.money < 0) shortage += x.money; else surplus += x.money; });
+  const rows = diffs.length ? diffs.map((x, i) =>
+    '<div class="row"><div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' +
+    esc(x.name) + '</div><div class="sub">учёт ' + fmtQ(x.before, x.unit) + ' → факт ' +
+    fmtQ(x.fact, x.unit) + '</div></div>' +
+    '<div class="r"><div class="val ' + (x.diff < 0 ? 'red' : 'green') + '">' +
+    (x.diff > 0 ? '+' : '') + fmtQ(x.diff, x.unit) + '</div>' +
+    '<div class="sub ' + (x.money < 0 ? 'red' : 'green') + '">' +
+    (x.money > 0 ? '+' : '') + fmtM(x.money) + '</div></div></div>').join('')
+    : '<div class="hint">Расхождений нет — всё сходится ✓</div>';
+  const html =
+    '<div class="card"><div class="biglabel">Итог по себестоимости</div>' +
+    '<div class="bignum ' + (d.amount < -0.005 ? 'red' : 'green') + '">' + fmtM(d.amount) +
+    '</div><div class="sub hint">' + dstr(d.date) + ' • ' + esc(d.creator_name || '') +
+    (shortage < 0 ? ' • недостача ' + fmtM(-shortage) : '') +
+    (surplus > 0 ? ' • излишки ' + fmtM(surplus) : '') + '</div></div>' +
+    '<div class="card"><h3>Расхождения</h3>' + rows + '</div>';
+  screen('Отчёт: инвентаризация', html, true);
+}
+
 // ===== мероприятия и точки =====
-const PL_STATE = { seg: 'events', city: '', ptype: '', calMode: 'day', selKey: null };
+const PL_STATE = { seg: 'events', calMode: 'day', selKey: null,
+  citySel: [], etypes: [], ptypes: [] };
 const RU_M_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт',
   'ноя', 'дек'];
 const RU_DW = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
@@ -1159,11 +1353,17 @@ function bookingBlock(el, kind, refId, meta) {
   });
 }
 
-function cityMatch(cityValue, query) {
-  return !query || (cityValue || '').toLowerCase().includes(query);
+function isBooked(x) {
+  return !!(x.bookings && x.bookings.length);
 }
 
-function evCardHtml(ev) {
+function bookBtnHtml(x, attr) {
+  return isBooked(x)
+    ? '<button class="bookbtn booked">Забронировано</button>'
+    : '<button class="bookbtn" ' + attr + '="' + x.id + '">Забронировать</button>';
+}
+
+function evCardHtml(ev, n) {
   const dates = dstr(ev.date_from) +
     (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
   // адрес — первый кусок комментария (площадка), без контактов
@@ -1171,12 +1371,14 @@ function evCardHtml(ev) {
   const place = [ev.city, addr].filter(Boolean).join(', ');
   return '<div class="card place" data-eid="' + ev.id + '" style="cursor:pointer">' +
     '<div class="pl-main">' +
-    '<div class="dochead"><div><b>' + esc(ev.name) + '</b></div>' +
+    '<div class="dochead"><div><b>' + n + '. ' + esc(ev.name) + '</b></div>' +
     '<div class="dt">' + dates + '</div></div>' +
+    '<div class="plfoot">' +
     (place ? '<div class="sub hint small">' + esc(place) + '</div>' : '') +
-    '<div class="plfoot"><div class="sub small" style="margin-top:4px">' + ownerLine(ev) +
-    '</div>' + bookingsLine(ev) + '</div></div>' +
-    '<button class="bookbtn" data-ebook="' + ev.id + '">Забронировать</button></div>';
+    (isBooked(ev) ? '' : '<div class="sub small" style="margin-top:4px">' + ownerLine(ev) +
+      '</div>') +
+    bookingsLine(ev) + '</div></div>' +
+    bookBtnHtml(ev, 'data-ebook') + '</div>';
 }
 
 function evListHtml(evs, per) {
@@ -1188,38 +1390,105 @@ function evListHtml(evs, per) {
       if (aLong !== bLong) return aLong - bLong;
       return a.date_from < b.date_from ? -1 : 1;
     });
-  return inSel.length ? inSel.map(evCardHtml).join('')
+  return inSel.length ? inSel.map((ev, i) => evCardHtml(ev, i + 1)).join('')
     : '<div class="card hint">На выбранный период мероприятий нет</div>';
 }
 
-function ptCardHtml(pt) {
+function ptCardHtml(pt, n) {
+  const form = isBooked(pt) ? '' :
+    '<div class="bkform" data-bkform="' + pt.id + '" hidden>' +
+    '<div class="hint small" style="margin:8px 0 4px">С какого по какое число:</div>' +
+    '<div class="grid2">' +
+    '<input type="date" class="bkf-from" value="' + today() + '">' +
+    '<input type="date" class="bkf-to" value="' + today() + '"></div>' +
+    '<button class="btn secondary" data-bkgo="' + pt.id +
+    '" style="margin:8px 0 0;padding:10px">Забронировать на эти даты</button></div>';
   return '<div class="card place" data-ptid="' + pt.id + '" style="cursor:pointer">' +
     '<div class="pl-main">' +
-    '<div><b>' + esc(pt.name) + '</b></div>' +
-    '<div class="sub hint small">' +
+    '<div><b>' + n + '. ' + esc(pt.name) + '</b></div>' +
+    '<div class="plfoot"><div class="sub hint small">' +
     ([esc(pt.address || ''), esc(pt.city)].filter(Boolean).join(', ') || 'адрес не указан') +
-    '</div><div class="plfoot">' + bookingsLine(pt) + '</div></div>' +
-    '<button class="bookbtn" data-book="' + pt.id + '">Забронировать</button></div>';
+    '</div>' + bookingsLine(pt) + '</div>' + form + '</div>' +
+    bookBtnHtml(pt, 'data-book') + '</div>';
 }
 
-function ptListHtml(points, q) {
-  const list = points.filter(pt => cityMatch(pt.city, q));
-  return list.length ? list.map(ptCardHtml).join('')
+function ptListHtml(points) {
+  return points.length ? points.map((pt, i) => ptCardHtml(pt, i + 1)).join('')
     : '<div class="card hint">Точек не найдено</div>';
+}
+
+// фильтры «два в одном»: кнопка со счётчиком + выпадающий список с мультивыбором
+function filtersHtml(cityCount, typeCount) {
+  return '<div class="grid2" style="margin-bottom:10px">' +
+    '<button class="btn secondary" id="fl-city-btn" style="margin:0;padding:11px">🏙 Города' +
+    (cityCount ? ' (' + cityCount + ')' : '') + ' ▾</button>' +
+    '<button class="btn secondary" id="fl-type-btn" style="margin:0;padding:11px">🎪 Вид' +
+    (typeCount ? ' (' + typeCount + ')' : '') + ' ▾</button></div>' +
+    '<div class="card" id="fl-city-panel" hidden>' +
+    '<div class="field"><input id="fl-city-q" placeholder="🔍 Поиск города…" autocomplete="off">' +
+    '</div><div id="fl-city-list" style="max-height:45vh;overflow-y:auto"></div></div>' +
+    '<div class="card" id="fl-type-panel" hidden><div id="fl-type-list"></div></div>';
+}
+
+function bindFilters(el, cities, types, selCities, selTypes, onChange) {
+  const cityBtn = el.querySelector('#fl-city-btn');
+  const typeBtn = el.querySelector('#fl-type-btn');
+  const cityPanel = el.querySelector('#fl-city-panel');
+  const typePanel = el.querySelector('#fl-type-panel');
+  const drawList = (box, options, sel, key) => {
+    box.innerHTML = options.map(o =>
+      '<div class="row" data-' + key + '="' + esc(o) + '" style="cursor:pointer">' +
+      '<div class="l small">' + esc(o) + '</div>' +
+      '<div class="r val green">' + (sel.includes(o) ? '✓' : '') + '</div></div>').join('') ||
+      '<div class="hint small">Пусто</div>';
+  };
+  const labels = () => {
+    cityBtn.innerHTML = '🏙 Города' + (selCities.length ? ' (' + selCities.length + ')' : '') + ' ▾';
+    typeBtn.innerHTML = '🎪 Вид' + (selTypes.length ? ' (' + selTypes.length + ')' : '') + ' ▾';
+  };
+  const redraw = () => {
+    const q = (el.querySelector('#fl-city-q').value || '').toLowerCase().trim();
+    drawList(el.querySelector('#fl-city-list'),
+      cities.filter(c => !q || c.toLowerCase().includes(q)), selCities, 'flc');
+    drawList(el.querySelector('#fl-type-list'), types, selTypes, 'flt');
+  };
+  redraw();
+  cityBtn.onclick = () => { cityPanel.hidden = !cityPanel.hidden; typePanel.hidden = true; };
+  typeBtn.onclick = () => { typePanel.hidden = !typePanel.hidden; cityPanel.hidden = true; };
+  el.querySelector('#fl-city-q').addEventListener('input', redraw);
+  el.addEventListener('click', e => {
+    const c = e.target.closest('[data-flc]');
+    const t = e.target.closest('[data-flt]');
+    if (!c && !t) return;
+    const val = c ? c.dataset.flc : t.dataset.flt;
+    const arr = c ? selCities : selTypes;
+    const i = arr.indexOf(val);
+    if (i >= 0) arr.splice(i, 1); else arr.push(val);
+    labels();
+    redraw();
+    onChange();
+  });
 }
 
 async function S_places() {
   const meta = await api('/api/places/meta');
   const isEv = PL_STATE.seg === 'events';
-  const cityQ = () => (PL_STATE.city || '').toLowerCase().trim();
   let listHtml = '';
   let calHtml = '';
   let allEvents = [];
   let allPoints = [];
   let per = null;
+  const evMatch = ev =>
+    (!PL_STATE.citySel.length || PL_STATE.citySel.includes(ev.city)) &&
+    (!PL_STATE.etypes.length || PL_STATE.etypes.includes(ev.etype || 'Другое'));
+  const ptMatch = pt =>
+    (!PL_STATE.citySel.length || PL_STATE.citySel.includes(pt.city)) &&
+    (!PL_STATE.ptypes.length || PL_STATE.ptypes.includes(pt.ptype || 'Другое'));
+  let typeOptions = [];
   if (isEv) {
     allEvents = (await api('/api/events?when=all')).events;
-    const evs = allEvents.filter(x => cityMatch(x.city, cityQ()));
+    typeOptions = [...new Set(allEvents.map(x => x.etype || 'Другое'))].sort();
+    const evs = allEvents.filter(evMatch);
     if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
     const items = calItems(PL_STATE.calMode);
     if (!items.some(it => it.key === PL_STATE.selKey)) {
@@ -1246,22 +1515,17 @@ async function S_places() {
     per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
     listHtml = evListHtml(evs, per);
   } else {
-    allPoints = (await api('/api/points?ptype=' + encodeURIComponent(PL_STATE.ptype))).points;
-    listHtml = ptListHtml(allPoints, cityQ());
+    allPoints = (await api('/api/points')).points;
+    typeOptions = [...new Set(allPoints.map(x => x.ptype || 'Другое'))].sort();
+    listHtml = ptListHtml(allPoints.filter(ptMatch));
   }
-  const typeChips = isEv ? '' :
-    '<div class="chips">' + [['', 'Все']].concat(P_TYPES.map(t => [t, t]))
-      .map(w => '<button class="chip' + (PL_STATE.ptype === w[0] ? ' on' : '') +
-        '" data-ptype="' + w[0] + '">' + w[1] + '</button>').join('') + '</div>';
+  const selTypes = isEv ? PL_STATE.etypes : PL_STATE.ptypes;
   const html =
     '<div class="seg" id="pl-seg"><button' + (isEv ? ' class="on"' : '') +
     '>📅 Мероприятия</button><button' + (!isEv ? ' class="on"' : '') + '>📍 Точки</button></div>' +
     '<button class="btn" id="pl-add">+ Добавить ' + (isEv ? 'мероприятие' : 'точку') + '</button>' +
-    calHtml + typeChips +
-    '<div class="field"><input id="pl-city" list="pl-cities" placeholder="🔍 Поиск по городу…" ' +
-    'value="' + esc(PL_STATE.city || '') + '" autocomplete="off">' +
-    '<datalist id="pl-cities">' +
-    meta.cities.map(c => '<option value="' + esc(c) + '">').join('') + '</datalist></div>' +
+    calHtml +
+    filtersHtml(PL_STATE.citySel.length, selTypes.length) +
     '<div id="pl-list">' + listHtml + '</div>';
   const el = screen('', html);
   el.querySelectorAll('#pl-seg button').forEach((b, i) => {
@@ -1269,10 +1533,10 @@ async function S_places() {
   });
   el.querySelector('#pl-add').onclick = () =>
     push(isEv ? S_eventEdit : S_pointEdit, null, meta);
-  const applyCity = () => {
+  const applyFilters = () => {
     const listEl = el.querySelector('#pl-list');
     if (isEv) {
-      const evs = allEvents.filter(x => cityMatch(x.city, cityQ()));
+      const evs = allEvents.filter(evMatch);
       listEl.innerHTML = evListHtml(evs, per);
       const stripEl = el.querySelector('#cal-strip');
       for (const c of stripEl.children) {
@@ -1280,14 +1544,10 @@ async function S_places() {
         c.classList.toggle('off', !has);
       }
     } else {
-      listEl.innerHTML = ptListHtml(allPoints, cityQ());
+      listEl.innerHTML = ptListHtml(allPoints.filter(ptMatch));
     }
   };
-  const cityInp = el.querySelector('#pl-city');
-  cityInp.addEventListener('input', () => {
-    clearTimeout(cityInp._t);
-    cityInp._t = setTimeout(() => { PL_STATE.city = cityInp.value; applyCity(); }, 250);
-  });
+  bindFilters(el, meta.cities, typeOptions, PL_STATE.citySel, selTypes, applyFilters);
   if (isEv) {
     const stripEl = el.querySelector('#cal-strip');
     const monthEl = el.querySelector('#cal-month');
@@ -1330,40 +1590,59 @@ async function S_places() {
   el.addEventListener('click', async e => {
     const cal = e.target.closest('[data-cal]');
     if (cal) { PL_STATE.selKey = cal.dataset.cal; render(); return; }
-    const pt = e.target.closest('[data-ptype]');
-    if (pt) { PL_STATE.ptype = pt.dataset.ptype; render(); return; }
     const eb = e.target.closest('[data-ebook]');
     if (eb) {
-      // бронь в один тап — на выбранную в календаре дату (в пределах дат события)
+      // бронь мероприятия в один тап — сразу, без подтверждения,
+      // на выбранную в календаре дату (в пределах дат события)
       const ev = allEvents.find(x => x.id === +eb.dataset.ebook);
       const evTo = ev.date_to || ev.date_from;
       const from = per.from > ev.date_from ? per.from : ev.date_from;
       const to = per.to < evTo ? per.to : evTo;
-      const dates = dstr(from) + (to !== from ? ' – ' + dstr(to) : '');
-      if (!(await confirmDlg('Забронировать «' + ev.name + '» на ' + dates + '?'))) return;
       try {
         await api('/api/bookings', 'POST', {
           kind: 'event', ref_id: ev.id, user_id: ME.id, date_from: from, date_to: to,
         });
         toast('Забронировано ✓', true);
-        render();
+        allEvents = (await api('/api/events?when=all')).events;
+        applyFilters();
       } catch (err) { toast(err.message); }
       return;
     }
+    const bk = e.target.closest('[data-book]');
+    if (bk) {
+      // показать выбор дат прямо в карточке
+      const f = el.querySelector('[data-bkform="' + bk.dataset.book + '"]');
+      if (f) f.hidden = !f.hidden;
+      return;
+    }
+    const go = e.target.closest('[data-bkgo]');
+    if (go) {
+      const f = el.querySelector('[data-bkform="' + go.dataset.bkgo + '"]');
+      try {
+        await api('/api/bookings', 'POST', {
+          kind: 'point', ref_id: +go.dataset.bkgo, user_id: ME.id,
+          date_from: f.querySelector('.bkf-from').value,
+          date_to: f.querySelector('.bkf-to').value,
+        });
+        toast('Забронировано ✓', true);
+        allPoints = (await api('/api/points')).points;
+        applyFilters();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    if (e.target.closest('.bkform')) return; // клики по форме дат — не навигация
     const ec = e.target.closest('[data-eid]');
     if (ec) {
       push(S_eventEdit, allEvents.find(x => x.id === +ec.dataset.eid), meta);
       return;
     }
-    const bk = e.target.closest('[data-book]');
     const pc = e.target.closest('[data-ptid]');
-    if (bk || pc) {
-      const pid = +(bk ? bk.dataset.book : pc.dataset.ptid);
-      api('/api/points').then(r =>
-        push(S_pointEdit, r.points.find(x => x.id === pid), meta, !!bk));
+    if (pc) {
+      push(S_pointEdit, allPoints.find(x => x.id === +pc.dataset.ptid), meta, false);
     }
   });
 }
+
 
 function ownerSelect(id, meta, current) {
   return '<div class="field"><label>Кто туда ездит</label><select id="' + id + '">' +
@@ -1377,6 +1656,35 @@ function cityField(id, meta, val) {
   return '<div class="field"><label>Город</label><input id="' + id + '" list="' + id + '-dl" value="' +
     esc(val || '') + '"><datalist id="' + id + '-dl">' +
     meta.cities.map(c => '<option value="' + esc(c) + '">').join('') + '</datalist></div>';
+}
+
+// красивая карточка мероприятия; редактирование — внутри
+async function S_eventView(ev, meta) {
+  const dates = dstr(ev.date_from) +
+    (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
+  const parts = (ev.comment || '').split(' • ').filter(Boolean);
+  const addr = parts[0] || '';
+  const contacts = parts.slice(1);
+  const row = (l, v) => '<div class="row"><div class="l hint">' + l +
+    '</div><div class="r val" style="text-align:right;max-width:60%">' + v + '</div></div>';
+  const html =
+    '<div class="card">' +
+    '<div style="font-size:22px;font-weight:800;line-height:1.25">' + esc(ev.name) + '</div>' +
+    '<div class="sub hint" style="margin:6px 0 10px">' +
+    [esc(ev.etype), esc(ev.city)].filter(Boolean).join(' • ') + '</div>' +
+    row('📅 Даты', dates) +
+    (addr ? row('📍 Площадка', esc(addr)) : '') +
+    row('👤 Кто ездит', ev.owner_name ? esc(ev.owner_name)
+      : '<span class="green">точка свободна</span>') +
+    (contacts.length
+      ? '<div class="hint small" style="margin-top:8px">' + esc(contacts.join(' • ')) + '</div>'
+      : '') +
+    '</div>' +
+    '<div class="card" id="bk-box"></div>' +
+    '<button class="btn secondary" id="ev-edit">✏️ Редактировать</button>';
+  const el = screen('Мероприятие', html, true);
+  bookingBlock(el, 'event', ev.id, meta);
+  el.querySelector('#ev-edit').onclick = () => push(S_eventEdit, ev, meta);
 }
 
 async function S_eventEdit(ev, meta) {
@@ -1505,23 +1813,70 @@ async function S_more() {
     ? [['history', '🗂', 'История моих операций']]
     : [
         ['products', '🏷', 'Номенклатура'],
+        ['prices', '💰', 'Цены продажи'],
         ['sup', '🚛', 'Поставщики'],
       ].concat(ownerish ? [['exp', '🧾', 'Расходы']] : [])
-      .concat([['docs', '📚', 'Все документы']])
+      .concat([['docs', '📚', 'Документы и отчёты']])
       .concat(showUsers ? [['users', '👤', 'Пользователи']] : [])
       .concat(admin ? [['set', '⚙️', 'Настройки']] : []);
-  const html = menuRows(items) +
+  const html = menuTiles(items) +
     '<div class="hint small" style="text-align:center;margin-top:16px">' +
     esc(ME.first_name + ' ' + ME.last_name) + ' • ' + roleName + '</div>';
   const el = screen('', html);
   bindMenu(el, {
     history: () => push(S_history),
     products: () => push(S_products),
+    prices: () => push(S_prices),
+    reports: () => push(S_reports),
     sup: () => push(S_suppliers),
     docs: () => push(S_docs),
     users: () => push(S_users),
     exp: () => push(S_expenses),
     set: () => push(S_settings),
+  });
+}
+
+// быстрое управление ценами продажи: весь товар списком, справа — цена
+async function S_prices() {
+  const products = (await getProducts(true)).filter(p => !p.archived);
+  const rows = products.map((p, i) =>
+    '<div class="row prow" data-name="' + esc(p.name.toLowerCase()) + '">' +
+    '<div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' + esc(p.name) +
+    '</div><div class="sub">себестоимость ' + fmtM(p.purchase_price) + '</div></div>' +
+    '<div class="r" style="display:flex;gap:6px;align-items:center">' +
+    '<input inputmode="decimal" class="pri" style="width:88px" data-pid="' +
+    p.id + '" data-old="' + p.retail_price + '" value="' +
+    (p.retail_price || '') + '" placeholder="цена">' +
+    '<button class="chip psave" data-pid="' + p.id + '" hidden>✓</button></div></div>')
+    .join('');
+  const html =
+    '<div class="card hint small">Меняй цену прямо в окошке — рядом появится кнопка ✓ ' +
+    'для сохранения.</div>' +
+    '<div class="field"><input id="pz-q" placeholder="🔍 Поиск товара…"></div>' +
+    '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>';
+  const el = screen('Цены продажи', html, true);
+  el.querySelector('#pz-q').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase().trim();
+    el.querySelectorAll('.prow').forEach(r => {
+      r.style.display = !q || r.dataset.name.includes(q) ? '' : 'none';
+    });
+  });
+  el.addEventListener('input', e => {
+    if (!e.target.classList.contains('pri')) return;
+    const changed = Math.abs(pnum(e.target.value) - parseFloat(e.target.dataset.old)) > 0.004;
+    e.target.parentElement.querySelector('.psave').hidden = !changed;
+  });
+  el.addEventListener('click', async e => {
+    const b = e.target.closest('.psave');
+    if (!b) return;
+    const inp = b.parentElement.querySelector('.pri');
+    try {
+      await api('/api/products/' + b.dataset.pid, 'PUT', { retail_price: pnum(inp.value) });
+      inp.dataset.old = String(pnum(inp.value));
+      b.hidden = true;
+      PRODUCTS_CACHE = null;
+      toast('Цена сохранена ✓', true);
+    } catch (err) { toast(err.message); }
   });
 }
 
@@ -1532,7 +1887,7 @@ async function S_products() {
   const rowP = p =>
     '<div class="row" data-pid="' + p.id + '" style="cursor:pointer">' +
     '<div class="l"><div class="name small">' + esc(p.name) + '</div>' +
-    '<div class="sub">закуп ' + fmtM(p.purchase_price) + ' • розница ' + fmtM(p.retail_price) +
+    '<div class="sub">себестоимость ' + fmtM(p.purchase_price) + ' • цена продажи ' + fmtM(p.retail_price) +
     ' • остаток ' + fmtQ(p.stock_qty, p.unit) + '</div></div><div class="r hint">›</div></div>';
   let listHtml = '', lastGroup = null;
   active.forEach(p => {
@@ -1575,9 +1930,9 @@ async function S_productEdit(p) {
     '<div class="seg" id="pe-unit"><button' + (!p || p.unit === 'кг' ? ' class="on"' : '') +
     '>кг</button><button' + (p && p.unit === 'шт' ? ' class="on"' : '') + '>шт</button></div>' +
     '<div class="grid2">' +
-    '<div class="field"><label>Закупочная, ₽</label><input id="pe-pp" inputmode="decimal" value="' +
+    '<div class="field"><label>Себестоимость, ₽</label><input id="pe-pp" inputmode="decimal" value="' +
     (p ? p.purchase_price : '') + '"></div>' +
-    '<div class="field"><label>Розничная, ₽</label><input id="pe-rp" inputmode="decimal" value="' +
+    '<div class="field"><label>Цена продажи, ₽</label><input id="pe-rp" inputmode="decimal" value="' +
     (p ? p.retail_price : '') + '"></div></div>' +
     '<button class="btn" id="pe-save">Сохранить</button>' +
     (p ? '<button class="btn secondary" id="pe-arch">' +

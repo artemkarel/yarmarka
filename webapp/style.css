@@ -24,7 +24,7 @@ html,body{ background:var(--bg); color:var(--text);
   border-radius:12px; font-size:22px; line-height:1; cursor:pointer; flex:none; }
 .subhead .subtitle{ font-size:21px; font-weight:800; }
 
-.card{ background:var(--card); border-radius:16px; padding:14px; margin-bottom:12px; }
+.card{ background:var(--card); border-radius:18px; padding:16px; margin-bottom:12px; }
 .card h3{ font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--hint);
   margin-bottom:10px; font-weight:700; }
 
@@ -32,8 +32,8 @@ html,body{ background:var(--bg); color:var(--text);
 .bignum.red{ color:var(--red); } .bignum.green{ color:var(--green); }
 .biglabel{ color:var(--hint); font-size:14px; margin-bottom:2px; }
 
-.row{ display:flex; justify-content:space-between; align-items:center; gap:10px;
-  padding:10px 0; border-bottom:1px solid var(--sep); }
+.row{ display:flex; justify-content:space-between; align-items:center; gap:12px;
+  padding:11px 0; border-bottom:1px solid var(--sep); }
 .row:last-child{ border-bottom:none; }
 .row .l{ min-width:0; }
 .row .name{ font-weight:600; }
@@ -49,7 +49,7 @@ html,body{ background:var(--bg); color:var(--text);
 .tile .tv{ font-size:17px; font-weight:800; margin-top:2px; }
 .tile .tl{ color:var(--hint); font-size:12px; }
 
-.btn{ display:block; width:100%; border:none; border-radius:14px; background:var(--accent);
+.btn{ display:block; width:100%; border:none; border-radius:16px; background:var(--accent);
   color:var(--accent-text); font-size:16px; font-weight:700; padding:14px; cursor:pointer;
   margin-bottom:10px; }
 .btn.secondary{ background:var(--card); color:var(--accent); }
@@ -102,12 +102,20 @@ details.doc .doclines{ padding:0 14px 12px; }
   overflow-y:auto; }
 .picker > *{ max-width:640px; margin-left:auto; margin-right:auto; }
 
+.tilemenu{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
+.tilebtn{ background:var(--card); border:none; border-radius:16px; padding:14px 12px;
+  text-align:left; cursor:pointer; font-size:14px; font-weight:700; color:var(--text);
+  transition:transform .12s ease; }
+.tilebtn .tico{ display:block; font-size:25px; margin-bottom:8px; }
+.tilebtn:active{ transform:scale(.96); }
+
 .place{ position:relative; }
 .place .pl-main{ min-width:0; }
 .place .plfoot{ padding-right:96px; }
 .bookbtn{ position:absolute; right:12px; bottom:12px; border:none; background:var(--accent);
   color:var(--accent-text); border-radius:9px; padding:6px 9px; font-size:10.5px;
   font-weight:700; cursor:pointer; line-height:1.2; }
+.bookbtn.booked{ background:var(--red); }
 
 .calwrap{ position:relative; margin-bottom:10px; }
 .calbar{ display:flex; align-items:center; background:var(--card); border-radius:16px;

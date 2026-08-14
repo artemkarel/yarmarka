@@ -5,8 +5,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import hashlib
+import hmac as hmac_lib
+
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, bot, config, db, services
@@ -271,14 +274,59 @@ def api_inventory(request: Request, payload: dict = Body(...)):
         db.get(), u, doc_date(payload, u), payload.get("lines"), "inventory", payload.get("comment"))}
 
 
+def _print_sig(doc_id):
+    key = (config.BOT_TOKEN or "yarmarka-print").encode()
+    return hmac_lib.new(key, f"print:{doc_id}".encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def _with_print(doc):
+    if doc and doc.get("type") == "vydacha":
+        doc["print_url"] = f"/print/{doc['id']}/{_print_sig(doc['id'])}"
+    return doc
+
+
+def _fq(x):
+    return f"{round(float(x), 3):g}".replace(".", ",")
+
+
+def _fm(x):
+    return f"{round(float(x)):,}".replace(",", " ") + " ₽"
+
+
+def _date_ru(d):
+    return f"{d[8:10]}.{d[5:7]}.{d[0:4]}"
+
+
+def _balance_text(bal):
+    if bal > 0.005:
+        return f"Итог: должен компании {_fm(bal)}"
+    if bal < -0.005:
+        return f"Итог: компания должна тебе {_fm(-bal)}"
+    return "Итог: расчёт закрыт, долгов нет"
+
+
 @app.post("/api/docs/vydacha")
 def api_vydacha(request: Request, payload: dict = Body(...)):
     u = current_user(request)
     need_staff(u)
     conn = db.get()
     st = services.settings_get(conn)
-    return {"doc": services.doc_vydacha(conn, u, payload.get("seller_id"), doc_date(payload, u),
-                                        payload.get("lines"), st["share_pct"], payload.get("comment"))}
+    doc = _with_print(services.doc_vydacha(
+        conn, u, payload.get("seller_id"), doc_date(payload, u),
+        payload.get("lines"), st["share_pct"], payload.get("comment")))
+    seller = services.user_by_id(conn, doc["seller_id"])
+    if seller:
+        lines_txt = "\n".join(
+            f"{i + 1}. {ln['name']} — {_fq(ln['qty'])} {ln['unit']} × "
+            f"{_fm(ln['retail_price'])} = {_fm(ln['qty'] * ln['retail_price'])}"
+            for i, ln in enumerate(doc["lines"]))
+        bal = services.seller_balance(conn, doc["seller_id"])["balance"]
+        bot.send_sync(seller["tg_id"],
+                      f"📦 Тебе выдан товар ({_date_ru(doc['date'])}):\n{lines_txt}\n\n"
+                      f"Всего по ценам продажи: {_fm(doc['amount'])}\n"
+                      f"Начислено за товар ({st['share_pct']:g}%): +{_fm(doc['money'])}\n"
+                      f"{_balance_text(bal)}")
+    return {"doc": doc}
 
 
 @app.post("/api/docs/sdacha")
@@ -287,8 +335,24 @@ def api_sdacha(request: Request, payload: dict = Body(...)):
     need_staff(u)
     conn = db.get()
     st = services.settings_get(conn)
-    return {"doc": services.doc_sdacha(conn, u, payload.get("seller_id"), doc_date(payload, u),
-                                       payload.get("lines"), st["share_pct"], payload.get("comment"))}
+    doc = services.doc_sdacha(conn, u, payload.get("seller_id"), doc_date(payload, u),
+                              payload.get("lines"), st["share_pct"], payload.get("comment"))
+    seller = services.user_by_id(conn, doc["seller_id"])
+    if seller:
+        b = services.seller_balance(conn, doc["seller_id"])
+        wh_val = sum(ln["qty_to_wh"] * ln["retail_price"] for ln in doc["lines"])
+        shelf_val = sum(ln["qty_to_shelf"] * ln["retail_price"] for ln in doc["lines"])
+        bot.send_sync(seller["tg_id"],
+                      f"↩️ Товар принят ({_date_ru(doc['date'])}).\n"
+                      f"Продано на {_fm(doc['amount'])}\n"
+                      f"Возвращено на склад: {_fm(wh_val)}\n"
+                      f"Убрано на твою полку: {_fm(shelf_val)}\n\n"
+                      f"Всего взял товара на {_fm(b['taken_value'])}, "
+                      f"продал на {_fm(b['sold_value'])}.\n"
+                      f"Терминал: пробито {_fm(b['terminal_raw'])}, "
+                      f"зачтено {_fm(b['terminal_credit'])}.\n"
+                      f"{_balance_text(b['balance'])}")
+    return {"doc": doc}
 
 
 @app.post("/api/docs/incass")
@@ -327,7 +391,70 @@ def api_doc(doc_id: int, request: Request):
     doc = services.doc_get(db.get(), doc_id)
     if u["role"] == "seller" and doc["seller_id"] != u["id"]:
         raise _err(403, "Нет доступа")
-    return {"doc": doc}
+    return {"doc": _with_print(doc)}
+
+
+@app.get("/print/{doc_id}/{sig}", response_class=HTMLResponse)
+def print_vydacha(doc_id: int, sig: str):
+    """Печатная форма УПД по выдаче. Доступ по подписанной ссылке из приложения."""
+    if not hmac_lib.compare_digest(sig, _print_sig(doc_id)):
+        raise HTTPException(404)
+    conn = db.get()
+    doc = services.doc_get(conn, doc_id)
+    if doc["type"] != "vydacha":
+        raise HTTPException(404)
+    st = services.settings_get(conn)
+
+    def money(x):
+        return f"{x:,.2f}".replace(",", " ").replace(".", ",")
+
+    def qty(x):
+        return f"{x:g}".replace(".", ",")
+
+    rows = "".join(
+        f"<tr><td>{i + 1}</td><td class='l'>{ln['name']}</td><td>{ln['unit']}</td>"
+        f"<td>{qty(ln['qty'])}</td><td>{money(ln['retail_price'])}</td>"
+        f"<td>{money(ln['qty'] * ln['retail_price'])}</td></tr>"
+        for i, ln in enumerate(doc["lines"])
+    )
+    d = doc["date"]
+    date_ru = f"{d[8:10]}.{d[5:7]}.{d[0:4]}"
+    html = f"""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>УПД №{doc['id']} от {date_ru}</title>
+<style>
+body{{font:14px/1.45 Arial,sans-serif;color:#000;max-width:800px;margin:24px auto;padding:0 16px}}
+h1{{font-size:18px;margin:0 0 4px}} .sub{{color:#333;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;margin:14px 0}}
+th,td{{border:1px solid #000;padding:6px 8px;text-align:center;font-size:13px}}
+td.l{{text-align:left}} tfoot td{{font-weight:bold}}
+.sig{{display:flex;justify-content:space-between;margin-top:40px;gap:30px}}
+.sig div{{flex:1}} .sig .line{{border-bottom:1px solid #000;height:28px;margin-bottom:4px}}
+.small{{font-size:12px;color:#333}}
+.noprint{{margin:18px 0}} @media print{{.noprint{{display:none}}}}
+button{{font-size:15px;padding:10px 22px;cursor:pointer}}
+</style></head><body>
+<div class="noprint"><button onclick="window.print()">🖨 Печать / сохранить в PDF</button></div>
+<h1>Универсальный передаточный документ №{doc['id']} от {date_ru}</h1>
+<div class="sub">Акт приёма-передачи товара на реализацию</div>
+<p><b>Передал (кладовщик):</b> {doc['creator_name'] or ''}<br>
+<b>Принял (продавец):</b> {doc['seller_name'] or ''}</p>
+<table>
+<thead><tr><th>№</th><th>Наименование товара</th><th>Ед.</th><th>Кол-во</th>
+<th>Цена, ₽</th><th>Сумма, ₽</th></tr></thead>
+<tbody>{rows}</tbody>
+<tfoot><tr><td colspan="5" class="l">Итого по ценам продажи</td>
+<td>{money(doc['amount'])}</td></tr>
+<tr><td colspan="5" class="l">К расчёту за товар ({st['share_pct']:g}%)</td>
+<td>{money(doc['money'])}</td></tr></tfoot>
+</table>
+<p class="small">Товар передан под реализацию. Расчёт — {st['share_pct']:g}% от стоимости
+проданного по ценам продажи; непроданный товар подлежит возврату.</p>
+<div class="sig">
+<div><div class="line"></div><div class="small">Передал: подпись, дата</div></div>
+<div><div class="line"></div><div class="small">Получил: подпись, дата</div></div>
+</div>
+</body></html>"""
+    return HTMLResponse(html)
 
 
 # ---------- брони ----------
@@ -449,6 +576,25 @@ def api_turnover(request: Request, date_from: str = "", date_to: str = ""):
         "total": rep["totals"]["sold_value"],
         "total_kg": rep["totals"]["sold_kg"],
     }
+
+
+@app.get("/api/analytics/products")
+def api_products_report(request: Request, date_from: str = "", date_to: str = ""):
+    u = current_user(request)
+    need_staff(u)
+    conn = db.get()
+    st = services.settings_get(conn)
+    today = datetime.now(user_tz(u)).strftime("%Y-%m-%d")
+    rep = services.products_report(conn, date_from or "2000-01-01", date_to or today,
+                                   st["share_pct"])
+    if u["role"] == "keeper":
+        # деньги компании кладовщику не показываем
+        for p in rep["products"]:
+            p.pop("our_share", None)
+            p.pop("profit", None)
+            p.pop("cogs", None)
+        rep["totals"].pop("profit", None)
+    return rep
 
 
 @app.get("/api/analytics/profit")
