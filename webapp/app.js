@@ -241,10 +241,25 @@ function stockListHtml(items, title) {
 }
 
 const DOC_META = {
-  prihod: ['📦', 'Приход'], initial: ['📋', 'Нач. остатки'], inventory: ['🔍', 'Инвентаризация'],
-  vydacha: ['🚚', 'Выдача'], sdacha: ['↩️', 'Сдача'], incass: ['💳', 'Инкассация'],
-  cash: ['💵', 'Наличные'],
+  prihod: ['📥', 'Поступление'], initial: ['📋', 'Нач. остатки'],
+  inventory: ['🔍', 'Инвентаризация'], vydacha: ['🚚', 'Выдача'], sdacha: ['📤', 'Сдача'],
+  incass: ['💳', 'Инкассация'], cash: ['💵', 'Наличные'],
 };
+
+// единый стиль меню: карточка со строками «иконка название ›»
+function menuRows(items) {
+  return '<div class="card" style="padding:4px 14px">' + items.map(it =>
+    '<div class="row" data-menu="' + it[0] + '" style="cursor:pointer">' +
+    '<div class="l name">' + it[1] + '  ' + it[2] + '</div>' +
+    '<div class="r hint">›</div></div>').join('') + '</div>';
+}
+
+function bindMenu(el, handlers) {
+  el.addEventListener('click', e => {
+    const m = e.target.closest('[data-menu]');
+    if (m && handlers[m.dataset.menu]) handlers[m.dataset.menu]();
+  });
+}
 
 function docCard(d, showSeller) {
   const meta = DOC_META[d.type] || ['📄', d.type];
@@ -524,10 +539,13 @@ async function S_sklad() {
       fmtQ(s.qty, s.unit) + '</div></div>').join('') + '</div>'
     : '';
   const html =
-    '<button class="btn" id="sk-prihod">📦 Приход товара</button>' +
-    '<button class="btn" id="sk-vydat">🚚 Выдать товар на реализацию</button>' +
-    '<div class="btnrow"><button class="btn secondary" id="sk-inv">🔍 Инвентаризация</button>' +
-    '<button class="btn secondary" id="sk-init">📋 Нач. остатки</button></div>' +
+    menuRows([
+      ['prihod', '📥', 'Поступление товара'],
+      ['vydat', '🚚', 'Выдача товара продавцу'],
+      ['priem', '📤', 'Приём товара от продавца'],
+      ['inv', '🔍', 'Инвентаризация'],
+      ['init', '📋', 'Начальные остатки'],
+    ]) +
     '<div class="tiles">' +
     '<div class="tile"><div class="tl">Всего кг</div><div class="tv">' + NF3.format(t.kg) + '</div></div>' +
     '<div class="tile"><div class="tl">Закупка</div><div class="tv">' + fmtM(t.purchase_value) + '</div></div>' +
@@ -537,30 +555,38 @@ async function S_sklad() {
     (rows || '<div class="hint small">Склад пуст. Добавь приход или начальные остатки.</div>') +
     '</div>' + shelf;
   const el = screen('', html);
-  el.querySelector('#sk-prihod').onclick = () => push(S_prihod);
-  el.querySelector('#sk-vydat').onclick = () => push(S_chooseSeller);
-  el.querySelector('#sk-inv').onclick = () => push(S_countSheet, 'inventory');
-  el.querySelector('#sk-init').onclick = () => push(S_countSheet, 'initial');
+  bindMenu(el, {
+    prihod: () => push(S_prihod),
+    vydat: () => push(S_chooseSeller, 'vydacha'),
+    priem: () => push(S_chooseSeller, 'sdacha'),
+    inv: () => push(S_countSheet, 'inventory'),
+    init: () => push(S_countSheet, 'initial'),
+  });
 }
 
-// выбор сотрудника для выдачи со склада
-async function S_chooseSeller() {
+// выбор сотрудника для выдачи или приёма товара
+async function S_chooseSeller(mode) {
+  const forSdacha = mode === 'sdacha';
   const r = await api('/api/sellers');
-  const html = r.sellers.length
-    ? '<div class="card hint small">Кому выдаём товар под реализацию?</div>' +
-      r.sellers.map(s =>
+  const sellers = forSdacha ? r.sellers.filter(s => s.hands_value > 0.005) : r.sellers;
+  const hint = forSdacha ? 'От кого принимаем товар?' : 'Кому выдаём товар под реализацию?';
+  const html = sellers.length
+    ? '<div class="card hint small">' + hint + '</div>' +
+      sellers.map(s =>
         '<div class="card" data-pick="' + s.id + '" style="cursor:pointer">' +
         '<div class="row" style="border:none;padding:2px 0"><div class="l">' +
         '<div class="name">' + esc(s.name) + '</div>' +
         '<div class="sub">на руках на ' + fmtM(s.hands_value) + '</div></div>' +
         '<div class="r hint">›</div></div></div>').join('')
-    : '<div class="card hint">Продавцов пока нет — они появятся после регистрации в боте.</div>';
-  const el = screen('Кому выдать', html, true);
+    : '<div class="card hint">' + (forSdacha
+        ? 'Ни у кого нет товара на руках — принимать нечего.'
+        : 'Продавцов пока нет — они появятся после регистрации в боте.') + '</div>';
+  const el = screen(forSdacha ? 'Приём товара' : 'Кому выдать', html, true);
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-pick]');
     if (!c) return;
-    stack.pop(); // после выдачи «назад» вернёт сразу на склад
-    push(S_vydacha, +c.dataset.pick);
+    stack.pop(); // после операции «назад» вернёт сразу на склад
+    push(forSdacha ? S_sdacha : S_vydacha, +c.dataset.pick);
   });
 }
 
@@ -579,8 +605,8 @@ async function S_prihod() {
     '<div id="pr-lines"></div>' +
     '<button class="btn secondary" id="pr-add">+ Добавить позицию</button>' +
     '<div class="card" id="pr-total" hidden></div>' +
-    '<button class="btn" id="pr-save">Провести приход</button>';
-  const el = screen('Приход товара', html, true);
+    '<button class="btn" id="pr-save">Провести поступление</button>';
+  const el = screen('Поступление товара', html, true);
   const linesEl = el.querySelector('#pr-lines');
 
   const totals = () => {
@@ -629,7 +655,7 @@ async function S_prihod() {
         supplier_id: +el.querySelector('#pr-sup').value || undefined,
         lines: out,
       });
-      toast('Приход проведён ✓', true);
+      toast('Поступление проведено ✓', true);
       PRODUCTS_CACHE = null;
       back();
     } catch (e) { toast(e.message); }
@@ -1118,16 +1144,12 @@ function cityMatch(cityValue, query) {
 function evCardHtml(ev) {
   const dates = dstr(ev.date_from) +
     (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
-  const shortComment = ev.comment && ev.comment.length > 90
-    ? ev.comment.slice(0, 90) + '…' : ev.comment;
   return '<div class="card place" data-eid="' + ev.id + '" style="cursor:pointer">' +
     '<div class="pl-main">' +
     '<div class="dochead"><div><b>' + esc(ev.name) + '</b></div>' +
     '<div class="dt">' + dates + '</div></div>' +
-    '<div class="sub hint small">' + [esc(ev.etype), esc(ev.city)].filter(Boolean).join(' • ') +
-    '</div><div class="sub small" style="margin-top:4px">' + ownerLine(ev) +
-    (shortComment ? ' • <span class="hint">' + esc(shortComment) + '</span>' : '') +
-    '</div>' + bookingsLine(ev) + '</div>' +
+    '<div class="sub small" style="margin-top:4px">' + ownerLine(ev) + '</div>' +
+    bookingsLine(ev) + '</div>' +
     '<button class="bookbtn" data-ebook="' + ev.id + '">Забронировать</button></div>';
 }
 
@@ -1452,30 +1474,28 @@ async function S_more() {
   const roleName = { admin: 'администратор', owner: 'совладелец', keeper: 'кладовщик',
     seller: 'продавец' }[ME.role] || ME.role;
   const showUsers = admin || ME.role === 'keeper';
-  const item = (id, ico, name) =>
-    '<div class="card" style="cursor:pointer" id="' + id + '"><div class="name">' + ico + ' ' +
-    name + '</div></div>';
-  const html =
-    (seller ? item('m-history', '🗂', 'История моих операций')
-      : item('m-products', '🏷', 'Номенклатура') +
-        item('m-sup', '🚛', 'Поставщики') +
-        (ownerish ? item('m-exp', '🧾', 'Расходы') : '') +
-        item('m-docs', '📚', 'Все документы') +
-        (showUsers ? item('m-users', '👤', 'Пользователи') : '') +
-        (admin ? item('m-set', '⚙️', 'Настройки') : '')) +
+  const items = seller
+    ? [['history', '🗂', 'История моих операций']]
+    : [
+        ['products', '🏷', 'Номенклатура'],
+        ['sup', '🚛', 'Поставщики'],
+      ].concat(ownerish ? [['exp', '🧾', 'Расходы']] : [])
+      .concat([['docs', '📚', 'Все документы']])
+      .concat(showUsers ? [['users', '👤', 'Пользователи']] : [])
+      .concat(admin ? [['set', '⚙️', 'Настройки']] : []);
+  const html = menuRows(items) +
     '<div class="hint small" style="text-align:center;margin-top:16px">' +
     esc(ME.first_name + ' ' + ME.last_name) + ' • ' + roleName + '</div>';
   const el = screen('', html);
-  if (seller) {
-    el.querySelector('#m-history').onclick = () => push(S_history);
-    return;
-  }
-  el.querySelector('#m-products').onclick = () => push(S_products);
-  el.querySelector('#m-sup').onclick = () => push(S_suppliers);
-  el.querySelector('#m-docs').onclick = () => push(S_docs);
-  if (showUsers) el.querySelector('#m-users').onclick = () => push(S_users);
-  if (ownerish) el.querySelector('#m-exp').onclick = () => push(S_expenses);
-  if (admin) el.querySelector('#m-set').onclick = () => push(S_settings);
+  bindMenu(el, {
+    history: () => push(S_history),
+    products: () => push(S_products),
+    sup: () => push(S_suppliers),
+    docs: () => push(S_docs),
+    users: () => push(S_users),
+    exp: () => push(S_expenses),
+    set: () => push(S_settings),
+  });
 }
 
 async function S_products() {
@@ -1690,8 +1710,9 @@ const DOCS_STATE = { type: '' };
 
 async function S_docs() {
   const r = await api('/api/docs?limit=100' + (DOCS_STATE.type ? '&type=' + DOCS_STATE.type : ''));
-  const types = [['', 'Все'], ['prihod', 'Приход'], ['vydacha', 'Выдача'], ['sdacha', 'Сдача'],
-    ['incass', 'Инкассация'], ['cash', 'Наличные'], ['inventory', 'Инвентаризация']];
+  const types = [['', 'Все'], ['prihod', 'Поступление'], ['vydacha', 'Выдача'],
+    ['sdacha', 'Сдача'], ['incass', 'Инкассация'], ['cash', 'Наличные'],
+    ['inventory', 'Инвентаризация']];
   const chips = types.map(t =>
     '<button class="chip' + (DOCS_STATE.type === t[0] ? ' on' : '') + '" data-t="' + t[0] + '">' +
     t[1] + '</button>').join('');
