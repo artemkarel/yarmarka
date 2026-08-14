@@ -69,13 +69,19 @@ def current_user(request: Request):
 
 
 def need_staff(u):
-    if u["role"] not in ("keeper", "admin"):
+    if u["role"] not in ("keeper", "owner", "admin"):
         raise _err(403, "Нет доступа")
 
 
 def need_admin(u):
     if u["role"] != "admin":
         raise _err(403, "Только для администратора")
+
+
+def need_owner(u):
+    # владельческие вещи: прибыль, расходы, наличные расчёты
+    if u["role"] not in ("owner", "admin"):
+        raise _err(403, "Только для владельцев")
 
 
 def need_not_keeper(u):
@@ -302,7 +308,7 @@ def api_incass(request: Request, payload: dict = Body(...)):
 @app.post("/api/docs/cash")
 def api_cash(request: Request, payload: dict = Body(...)):
     u = current_user(request)
-    need_admin(u)
+    need_owner(u)
     return {"doc": services.doc_cash(db.get(), u, payload.get("seller_id"), doc_date(payload, u),
                                      payload.get("amount"), payload.get("comment"))}
 
@@ -437,7 +443,8 @@ def api_turnover(request: Request, date_from: str = "", date_to: str = ""):
     rep = services.sales_report(conn, date_from or "2000-01-01", date_to or today,
                                 st["share_pct"])
     return {
-        "sellers": [{"name": s["name"], "sold_value": s["sold_value"], "sold_kg": s["sold_kg"]}
+        "sellers": [{"seller_id": s["seller_id"], "name": s["name"],
+                     "sold_value": s["sold_value"], "sold_kg": s["sold_kg"]}
                     for s in rep["sellers"]],
         "total": rep["totals"]["sold_value"],
         "total_kg": rep["totals"]["sold_kg"],
@@ -447,7 +454,7 @@ def api_turnover(request: Request, date_from: str = "", date_to: str = ""):
 @app.get("/api/analytics/profit")
 def api_profit(request: Request, date_from: str = "", date_to: str = ""):
     u = current_user(request)
-    need_admin(u)
+    need_owner(u)
     conn = db.get()
     st = services.settings_get(conn)
     today = datetime.now(user_tz(u)).strftime("%Y-%m-%d")
@@ -460,7 +467,7 @@ def api_profit(request: Request, date_from: str = "", date_to: str = ""):
 @app.get("/api/expenses")
 def api_expenses(request: Request, date_from: str = "", date_to: str = ""):
     u = current_user(request)
-    need_admin(u)
+    need_owner(u)
     today = datetime.now(user_tz(u)).strftime("%Y-%m-%d")
     return services.expenses_list(db.get(), date_from or "2000-01-01", date_to or today)
 
@@ -468,7 +475,7 @@ def api_expenses(request: Request, date_from: str = "", date_to: str = ""):
 @app.post("/api/expenses")
 def api_expense_add(request: Request, payload: dict = Body(...)):
     u = current_user(request)
-    need_admin(u)
+    need_owner(u)
     return {"expense": services.expense_add(db.get(), u, doc_date(payload, u),
                                             payload.get("category"), payload.get("amount"),
                                             payload.get("comment"))}
@@ -477,7 +484,7 @@ def api_expense_add(request: Request, payload: dict = Body(...)):
 @app.delete("/api/expenses/{eid}")
 def api_expense_delete(eid: int, request: Request):
     u = current_user(request)
-    need_admin(u)
+    need_owner(u)
     return services.expense_delete(db.get(), eid)
 
 
@@ -497,10 +504,10 @@ def api_user_update(uid: int, request: Request, payload: dict = Body(...)):
     target = services.user_by_id(db.get(), uid)
     if target is None:
         raise _err(404, "Пользователь не найден")
-    if u["role"] == "keeper":
-        # кладовщик ведёт продавцов, но не трогает админов и не раздаёт админку
-        if target["role"] == "admin" or payload.get("role") == "admin":
-            raise _err(403, "Только администратор может управлять админами")
+    if u["role"] in ("keeper", "owner"):
+        # кладовщик ведёт продавцов, но не трогает владельцев и не раздаёт их роли
+        if target["role"] in ("admin", "owner") or payload.get("role") in ("admin", "owner"):
+            raise _err(403, "Только администратор может управлять владельцами")
     if uid == u["id"] and (payload.get("role", u["role"]) != u["role"]
                           or payload.get("active", True) in (False, 0)):
         raise _err(400, "Нельзя понизить или отключить самого себя")

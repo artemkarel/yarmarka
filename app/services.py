@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from . import db
 
 EPS = 1e-6
-ROLES = ("seller", "keeper", "admin")
+ROLES = ("seller", "keeper", "owner", "admin")
 UNITS = ("кг", "шт")
 
 _lock = threading.Lock()

@@ -76,6 +76,8 @@ async function getProducts(force) {
 
 // ===== навигация =====
 let stack = [];
+let ANIM = null; // push | backin | tab — анимация ближайшей отрисовки экрана
+
 function render() {
   const top = stack[stack.length - 1];
   top.fn.apply(null, top.args);
@@ -83,16 +85,34 @@ function render() {
 }
 function push(fn) {
   stack.push({ fn, args: Array.prototype.slice.call(arguments, 1) });
+  ANIM = 'push';
   render();
 }
-function back() { if (stack.length > 1) { stack.pop(); render(); } }
+function back() {
+  if (stack.length < 2) return;
+  const sc = document.getElementById('screen');
+  sc.style.transition = 'transform .2s ease, opacity .2s ease';
+  sc.style.transform = 'translateX(100%)';
+  sc.style.opacity = '0.4';
+  setTimeout(() => {
+    sc.style.transition = '';
+    sc.style.transform = '';
+    sc.style.opacity = '';
+    stack.pop();
+    ANIM = 'backin';
+    render();
+  }, 190);
+}
 window.back = back;
 if (tg) tg.BackButton.onClick(back);
 
 function setTab(fn, idx) {
   stack = [{ fn, args: [] }];
+  ANIM = 'tab';
   render();
   document.querySelectorAll('#nav button').forEach((b, i) => b.classList.toggle('on', i === idx));
+  const ind = document.querySelector('#nav .ind');
+  if (ind) ind.style.transform = 'translateX(' + idx * 100 + '%)';
 }
 
 function screen(title, html, sub) {
@@ -102,11 +122,66 @@ function screen(title, html, sub) {
       '<div class="subtitle">' + esc(title) + '</div></div>'
     : (title ? '<div class="pagetitle">' + esc(title) + '</div>' : '');
   el.innerHTML = head + html;
+  el.classList.remove('anim-push', 'anim-backin', 'anim-tab');
+  if (ANIM) {
+    void el.offsetWidth;
+    el.classList.add('anim-' + ANIM);
+    ANIM = null;
+  }
   window.scrollTo(0, 0);
   return el;
 }
 
+// свайп от левого края — назад: экран (вместе с шапкой) едет за пальцем
+(function () {
+  const sc = () => document.getElementById('screen');
+  let t0 = null;
+  document.addEventListener('touchstart', e => {
+    t0 = null;
+    if (stack.length < 2 || document.querySelector('.picker')) return;
+    const t = e.touches[0];
+    if (t.clientX <= 44) t0 = { x: t.clientX, y: t.clientY, drag: false, dead: false };
+  }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    if (!t0 || t0.dead) return;
+    const t = e.touches[0];
+    const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
+    if (!t0.drag) {
+      if (Math.abs(dy) > 14 && Math.abs(dy) > Math.abs(dx)) { t0.dead = true; return; }
+      if (dx > 8) t0.drag = true;
+      else return;
+    }
+    const el = sc();
+    el.style.transition = 'none';
+    el.style.transform = 'translateX(' + Math.max(0, dx) + 'px)';
+    t0.dx = dx;
+  }, { passive: true });
+  document.addEventListener('touchend', () => {
+    if (!t0 || !t0.drag) { t0 = null; return; }
+    const el = sc();
+    const dx = t0.dx || 0;
+    t0 = null;
+    if (dx > 90) {
+      el.style.transition = 'transform .16s ease';
+      el.style.transform = 'translateX(100%)';
+      setTimeout(() => {
+        el.style.transition = '';
+        el.style.transform = '';
+        stack.pop();
+        ANIM = 'backin';
+        render();
+        if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
+      }, 160);
+    } else {
+      el.style.transition = 'transform .18s ease';
+      el.style.transform = 'translateX(0)';
+      setTimeout(() => { el.style.transition = ''; el.style.transform = ''; }, 200);
+    }
+  }, { passive: true });
+})();
+
 function buildNav() {
+  const ownerish = ME.role === 'admin' || ME.role === 'owner';
   let items;
   if (ME.role === 'seller') {
     items = [['🏠', 'Главная', S_home], ['📦', 'Склад', S_skladView],
@@ -120,8 +195,9 @@ function buildNav() {
              ['📊', 'Аналитика', S_analytics], ['⋯', 'Ещё', S_more]];
   }
   const nav = document.getElementById('nav');
-  nav.innerHTML = items.map(it =>
-    '<button><span class="ico">' + it[0] + '</span>' + it[1] + '</button>').join('');
+  nav.innerHTML = '<div class="ind" style="width:' + (100 / items.length) + '%"></div>' +
+    items.map(it =>
+      '<button><span class="ico">' + it[0] + '</span>' + it[1] + '</button>').join('');
   nav.hidden = false;
   nav.querySelectorAll('button').forEach((b, i) => {
     b.onclick = () => setTab(items[i][2], i);
@@ -321,7 +397,7 @@ async function S_home() {
     (!r.stock.hands.length && !r.stock.shelf.length
       ? '<div class="card hint">Товара на тебе нет. Возьми товар на складе — и он появится здесь.</div>'
       : '');
-  const el = screen('Привет, ' + ME.first_name + '!', html);
+  const el = screen('', html);
   el.querySelector('#go-incass').onclick = () => push(S_incass, null);
 }
 
@@ -340,7 +416,7 @@ async function S_skladView() {
     '</div></div></div>' +
     '<div class="field"><input id="sv-q" placeholder="Поиск товара…"></div>' +
     '<div class="card">' + (rows || '<div class="hint">Склад пуст</div>') + '</div>';
-  const el = screen('Склад', html);
+  const el = screen('', html);
   el.querySelector('#sv-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(row => {
@@ -356,16 +432,28 @@ async function S_turnover() {
   const p = periodDates(TO_STATE);
   const chips = periodChips(TO_STATE, S_turnover);
   const r = await api('/api/analytics/turnover?date_from=' + p.from + '&date_to=' + p.to);
+  const mine = r.sellers.find(s => s.seller_id === ME.id) || { sold_value: 0, sold_kg: 0 };
+  const medals = ['🥇', '🥈', '🥉'];
   const html = chips.html +
-    '<div class="card"><h3>Оборот по ценам продажи</h3>' +
-    (r.sellers.length ? r.sellers.map(s =>
-      '<div class="row"><div class="l"><div class="name">' + esc(s.name) + '</div>' +
-      (s.sold_kg > 0 ? '<div class="sub">' + fmtQ(s.sold_kg, 'кг') + '</div>' : '') +
-      '</div><div class="r val">' + fmtM(s.sold_value) + '</div></div>').join('') +
-      '<div class="row total"><div class="l">Итого</div><div class="r">' + fmtM(r.total) +
+    '<div class="card"><h3>📈 Моя аналитика</h3>' +
+    '<div class="biglabel">Мой оборот за период</div>' +
+    '<div class="bignum">' + fmtM(mine.sold_value) + '</div>' +
+    (mine.sold_kg > 0
+      ? '<div class="sub hint">' + fmtQ(mine.sold_kg, 'кг') + ' продано</div>' : '') +
+    '</div>' +
+    '<div class="card"><h3>🏆 Рейтинг компании</h3>' +
+    (r.sellers.length ? r.sellers.map((s, i) => {
+      const my = s.seller_id === ME.id;
+      return '<div class="row"><div class="l"><div class="name' +
+        (my ? '" style="color:var(--accent)' : '') + '">' +
+        (medals[i] || (i + 1) + '.') + ' ' + esc(s.name) + (my ? ' (ты)' : '') + '</div>' +
+        (s.sold_kg > 0 ? '<div class="sub">' + fmtQ(s.sold_kg, 'кг') + '</div>' : '') +
+        '</div><div class="r val">' + fmtM(s.sold_value) + '</div></div>';
+    }).join('') +
+      '<div class="row total"><div class="l">Вся компания</div><div class="r">' + fmtM(r.total) +
       '</div></div>'
       : '<div class="hint small">Продаж за период нет</div>') + '</div>';
-  const el = screen('Аналитика', html);
+  const el = screen('', html);
   chips.bind(el);
 }
 
@@ -437,6 +525,7 @@ async function S_sklad() {
     : '';
   const html =
     '<button class="btn" id="sk-prihod">📦 Приход товара</button>' +
+    '<button class="btn" id="sk-vydat">🚚 Выдать товар на реализацию</button>' +
     '<div class="btnrow"><button class="btn secondary" id="sk-inv">🔍 Инвентаризация</button>' +
     '<button class="btn secondary" id="sk-init">📋 Нач. остатки</button></div>' +
     '<div class="tiles">' +
@@ -447,10 +536,32 @@ async function S_sklad() {
     '<div class="card"><h3>Остатки на складе</h3>' +
     (rows || '<div class="hint small">Склад пуст. Добавь приход или начальные остатки.</div>') +
     '</div>' + shelf;
-  const el = screen('Склад', html);
+  const el = screen('', html);
   el.querySelector('#sk-prihod').onclick = () => push(S_prihod);
+  el.querySelector('#sk-vydat').onclick = () => push(S_chooseSeller);
   el.querySelector('#sk-inv').onclick = () => push(S_countSheet, 'inventory');
   el.querySelector('#sk-init').onclick = () => push(S_countSheet, 'initial');
+}
+
+// выбор сотрудника для выдачи со склада
+async function S_chooseSeller() {
+  const r = await api('/api/sellers');
+  const html = r.sellers.length
+    ? '<div class="card hint small">Кому выдаём товар под реализацию?</div>' +
+      r.sellers.map(s =>
+        '<div class="card" data-pick="' + s.id + '" style="cursor:pointer">' +
+        '<div class="row" style="border:none;padding:2px 0"><div class="l">' +
+        '<div class="name">' + esc(s.name) + '</div>' +
+        '<div class="sub">на руках на ' + fmtM(s.hands_value) + '</div></div>' +
+        '<div class="r hint">›</div></div></div>').join('')
+    : '<div class="card hint">Продавцов пока нет — они появятся после регистрации в боте.</div>';
+  const el = screen('Кому выдать', html, true);
+  el.addEventListener('click', e => {
+    const c = e.target.closest('[data-pick]');
+    if (!c) return;
+    stack.pop(); // после выдачи «назад» вернёт сразу на склад
+    push(S_vydacha, +c.dataset.pick);
+  });
 }
 
 async function S_prihod() {
@@ -586,7 +697,7 @@ async function S_sellers() {
       '<div class="r">' + bal + '</div></div></div>';
   }).join('')
     : '<div class="card hint">Продавцов пока нет. Они появятся после регистрации в боте.</div>';
-  const el = screen('Продавцы', html);
+  const el = screen('', html);
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-sid]');
     if (c) push(S_seller, +c.dataset.sid);
@@ -595,7 +706,7 @@ async function S_sellers() {
 
 async function S_seller(sid) {
   const r = await api('/api/sellers/' + sid);
-  const admin = ME.role === 'admin';
+  const admin = ME.role === 'admin' || ME.role === 'owner';
   const html =
     balanceHtml(r.balance, false) +
     '<div class="btnrow">' +
@@ -827,7 +938,7 @@ async function S_analytics() {
     api('/api/analytics/sales?' + qs), api('/api/analytics/on_sellers'),
   ]);
   let profitHtml = '';
-  if (ME.role === 'admin') {
+  if (ME.role === 'admin' || ME.role === 'owner') {
     const pr = await api('/api/analytics/profit?' + qs);
     const row = (l, v, cls) => '<div class="row"><div class="l hint">' + l +
       '</div><div class="r val ' + (cls || '') + '">' + v + '</div></div>';
@@ -887,7 +998,7 @@ async function S_analytics() {
     '</div>' +
     '<div class="card"><h3>Продажи по продавцам</h3>' + sellersHtml + '</div>' +
     '<div class="card"><h3>Товар на продавцах</h3>' + onSellersHtml + '</div>';
-  const el = screen('Аналитика', html);
+  const el = screen('', html);
   chips.bind(el);
 }
 
@@ -1000,18 +1111,67 @@ function bookingBlock(el, kind, refId, meta) {
   });
 }
 
+function cityMatch(cityValue, query) {
+  return !query || (cityValue || '').toLowerCase().includes(query);
+}
+
+function evCardHtml(ev) {
+  const dates = dstr(ev.date_from) +
+    (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
+  const shortComment = ev.comment && ev.comment.length > 90
+    ? ev.comment.slice(0, 90) + '…' : ev.comment;
+  return '<div class="card place" data-eid="' + ev.id + '" style="cursor:pointer">' +
+    '<div class="pl-main">' +
+    '<div class="dochead"><div><b>' + esc(ev.name) + '</b></div>' +
+    '<div class="dt">' + dates + '</div></div>' +
+    '<div class="sub hint small">' + [esc(ev.etype), esc(ev.city)].filter(Boolean).join(' • ') +
+    '</div><div class="sub small" style="margin-top:4px">' + ownerLine(ev) +
+    (shortComment ? ' • <span class="hint">' + esc(shortComment) + '</span>' : '') +
+    '</div>' + bookingsLine(ev) + '</div>' +
+    '<button class="bookbtn" data-ebook="' + ev.id + '">Забронировать</button></div>';
+}
+
+function evListHtml(evs, per) {
+  // сначала события, начинающиеся в выбранном периоде; длящиеся (начались раньше) — в конце
+  const inSel = evs.filter(ev => evIntersects(ev, per))
+    .sort((a, b) => {
+      const aLong = a.date_from < per.from ? 1 : 0;
+      const bLong = b.date_from < per.from ? 1 : 0;
+      if (aLong !== bLong) return aLong - bLong;
+      return a.date_from < b.date_from ? -1 : 1;
+    });
+  return inSel.length ? inSel.map(evCardHtml).join('')
+    : '<div class="card hint">На выбранный период мероприятий нет</div>';
+}
+
+function ptCardHtml(pt) {
+  return '<div class="card place" data-ptid="' + pt.id + '" style="cursor:pointer">' +
+    '<div class="pl-main">' +
+    '<div><b>' + esc(pt.name) + '</b></div>' +
+    '<div class="sub hint small">' +
+    ([esc(pt.address || ''), esc(pt.city)].filter(Boolean).join(', ') || 'адрес не указан') +
+    '</div>' + bookingsLine(pt) + '</div>' +
+    '<button class="bookbtn" data-book="' + pt.id + '">Забронировать</button></div>';
+}
+
+function ptListHtml(points, q) {
+  const list = points.filter(pt => cityMatch(pt.city, q));
+  return list.length ? list.map(ptCardHtml).join('')
+    : '<div class="card hint">Точек не найдено</div>';
+}
+
 async function S_places() {
   const meta = await api('/api/places/meta');
   const isEv = PL_STATE.seg === 'events';
-  const cityOpts = '<option value="">Все города</option>' + meta.cities.map(c =>
-    '<option' + (PL_STATE.city === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('');
+  const cityQ = () => (PL_STATE.city || '').toLowerCase().trim();
   let listHtml = '';
   let calHtml = '';
   let allEvents = [];
+  let allPoints = [];
+  let per = null;
   if (isEv) {
     allEvents = (await api('/api/events?when=all')).events;
-    let evs = allEvents;
-    if (PL_STATE.city) evs = evs.filter(x => x.city === PL_STATE.city);
+    const evs = allEvents.filter(x => cityMatch(x.city, cityQ()));
     if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
     const items = calItems(PL_STATE.calMode);
     if (!items.some(it => it.key === PL_STATE.selKey)) {
@@ -1035,34 +1195,11 @@ async function S_places() {
       '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
       '<button class="calarr left" id="cal-prev">‹</button>' +
       '<button class="calarr right" id="cal-next">›</button></div>';
-    const per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
-    const inSel = evs.filter(ev => evIntersects(ev, per))
-      .sort((a, b) => a.date_from < b.date_from ? -1 : 1);
-    listHtml = inSel.length ? inSel.map(ev => {
-      const dates = dstr(ev.date_from) +
-        (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
-      const shortComment = ev.comment && ev.comment.length > 90
-        ? ev.comment.slice(0, 90) + '…' : ev.comment;
-      return '<div class="card" data-eid="' + ev.id + '" style="cursor:pointer">' +
-        '<div class="dochead"><div><b>' + esc(ev.name) + '</b></div>' +
-        '<div class="dt">' + dates + '</div></div>' +
-        '<div class="sub hint small">' + [esc(ev.etype), esc(ev.city)].filter(Boolean).join(' • ') +
-        '</div><div class="sub small" style="margin-top:4px">' + ownerLine(ev) +
-        (shortComment ? ' • <span class="hint">' + esc(shortComment) + '</span>' : '') +
-        '</div>' + bookingsLine(ev) + '</div>';
-    }).join('') : '<div class="card hint">На выбранный период мероприятий нет</div>';
+    per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
+    listHtml = evListHtml(evs, per);
   } else {
-    const r = await api('/api/points?ptype=' + encodeURIComponent(PL_STATE.ptype) +
-      '&city=' + encodeURIComponent(PL_STATE.city));
-    listHtml = r.points.length ? r.points.map(pt =>
-      '<div class="card" data-ptid="' + pt.id + '" style="cursor:pointer">' +
-      '<div><b>' + esc(pt.name) + '</b></div>' +
-      '<div class="sub hint small">' +
-      ([esc(pt.address || ''), esc(pt.city)].filter(Boolean).join(', ') || 'адрес не указан') +
-      '</div>' + bookingsLine(pt) +
-      '<button class="btn secondary" data-book="' + pt.id +
-      '" style="margin:10px 0 0;padding:10px">Забронировать</button></div>').join('')
-      : '<div class="card hint">Точек нет — добавь первую!</div>';
+    allPoints = (await api('/api/points?ptype=' + encodeURIComponent(PL_STATE.ptype))).points;
+    listHtml = ptListHtml(allPoints, cityQ());
   }
   const typeChips = isEv ? '' :
     '<div class="chips">' + [['', 'Все']].concat(P_TYPES.map(t => [t, t]))
@@ -1073,16 +1210,35 @@ async function S_places() {
     '>📅 Мероприятия</button><button' + (!isEv ? ' class="on"' : '') + '>📍 Точки</button></div>' +
     '<button class="btn" id="pl-add">+ Добавить ' + (isEv ? 'мероприятие' : 'точку') + '</button>' +
     calHtml + typeChips +
-    '<div class="field"><select id="pl-city">' + cityOpts + '</select></div>' +
-    listHtml;
-  const el = screen('Точки и события', html);
+    '<div class="field"><input id="pl-city" list="pl-cities" placeholder="🔍 Поиск по городу…" ' +
+    'value="' + esc(PL_STATE.city || '') + '" autocomplete="off">' +
+    '<datalist id="pl-cities">' +
+    meta.cities.map(c => '<option value="' + esc(c) + '">').join('') + '</datalist></div>' +
+    '<div id="pl-list">' + listHtml + '</div>';
+  const el = screen('', html);
   el.querySelectorAll('#pl-seg button').forEach((b, i) => {
     b.onclick = () => { PL_STATE.seg = i === 0 ? 'events' : 'points'; render(); };
   });
   el.querySelector('#pl-add').onclick = () =>
     push(isEv ? S_eventEdit : S_pointEdit, null, meta);
-  el.querySelector('#pl-city').addEventListener('change', e => {
-    PL_STATE.city = e.target.value; render();
+  const applyCity = () => {
+    const listEl = el.querySelector('#pl-list');
+    if (isEv) {
+      const evs = allEvents.filter(x => cityMatch(x.city, cityQ()));
+      listEl.innerHTML = evListHtml(evs, per);
+      const stripEl = el.querySelector('#cal-strip');
+      for (const c of stripEl.children) {
+        const has = evs.some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, c.dataset.cal)));
+        c.classList.toggle('off', !has);
+      }
+    } else {
+      listEl.innerHTML = ptListHtml(allPoints, cityQ());
+    }
+  };
+  const cityInp = el.querySelector('#pl-city');
+  cityInp.addEventListener('input', () => {
+    clearTimeout(cityInp._t);
+    cityInp._t = setTimeout(() => { PL_STATE.city = cityInp.value; applyCity(); }, 250);
   });
   if (isEv) {
     const stripEl = el.querySelector('#cal-strip');
@@ -1123,11 +1279,28 @@ async function S_places() {
       render();
     });
   }
-  el.addEventListener('click', e => {
+  el.addEventListener('click', async e => {
     const cal = e.target.closest('[data-cal]');
     if (cal) { PL_STATE.selKey = cal.dataset.cal; render(); return; }
     const pt = e.target.closest('[data-ptype]');
     if (pt) { PL_STATE.ptype = pt.dataset.ptype; render(); return; }
+    const eb = e.target.closest('[data-ebook]');
+    if (eb) {
+      // бронь мероприятия в один тап — сразу на его даты
+      const ev = allEvents.find(x => x.id === +eb.dataset.ebook);
+      const dates = dstr(ev.date_from) +
+        (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
+      if (!(await confirmDlg('Забронировать «' + ev.name + '» (' + dates + ') на себя?'))) return;
+      try {
+        await api('/api/bookings', 'POST', {
+          kind: 'event', ref_id: ev.id, user_id: ME.id,
+          date_from: ev.date_from, date_to: ev.date_to || ev.date_from,
+        });
+        toast('Забронировано ✓', true);
+        render();
+      } catch (err) { toast(err.message); }
+      return;
+    }
     const ec = e.target.closest('[data-eid]');
     if (ec) {
       push(S_eventEdit, allEvents.find(x => x.id === +ec.dataset.eid), meta);
@@ -1274,8 +1447,11 @@ async function S_pointEdit(pt, meta, scrollToBooking) {
 // ===== ещё =====
 async function S_more() {
   const admin = ME.role === 'admin';
+  const ownerish = admin || ME.role === 'owner';
   const seller = ME.role === 'seller';
-  const roleName = admin ? 'администратор' : (seller ? 'продавец' : 'кладовщик');
+  const roleName = { admin: 'администратор', owner: 'совладелец', keeper: 'кладовщик',
+    seller: 'продавец' }[ME.role] || ME.role;
+  const showUsers = admin || ME.role === 'keeper';
   const item = (id, ico, name) =>
     '<div class="card" style="cursor:pointer" id="' + id + '"><div class="name">' + ico + ' ' +
     name + '</div></div>';
@@ -1283,13 +1459,13 @@ async function S_more() {
     (seller ? item('m-history', '🗂', 'История моих операций')
       : item('m-products', '🏷', 'Номенклатура') +
         item('m-sup', '🚛', 'Поставщики') +
-        (admin ? item('m-exp', '🧾', 'Расходы') : '') +
+        (ownerish ? item('m-exp', '🧾', 'Расходы') : '') +
         item('m-docs', '📚', 'Все документы') +
-        item('m-users', '👤', 'Пользователи') +
+        (showUsers ? item('m-users', '👤', 'Пользователи') : '') +
         (admin ? item('m-set', '⚙️', 'Настройки') : '')) +
     '<div class="hint small" style="text-align:center;margin-top:16px">' +
     esc(ME.first_name + ' ' + ME.last_name) + ' • ' + roleName + '</div>';
-  const el = screen('Ещё', html);
+  const el = screen('', html);
   if (seller) {
     el.querySelector('#m-history').onclick = () => push(S_history);
     return;
@@ -1297,11 +1473,9 @@ async function S_more() {
   el.querySelector('#m-products').onclick = () => push(S_products);
   el.querySelector('#m-sup').onclick = () => push(S_suppliers);
   el.querySelector('#m-docs').onclick = () => push(S_docs);
-  el.querySelector('#m-users').onclick = () => push(S_users);
-  if (admin) {
-    el.querySelector('#m-exp').onclick = () => push(S_expenses);
-    el.querySelector('#m-set').onclick = () => push(S_settings);
-  }
+  if (showUsers) el.querySelector('#m-users').onclick = () => push(S_users);
+  if (ownerish) el.querySelector('#m-exp').onclick = () => push(S_expenses);
+  if (admin) el.querySelector('#m-set').onclick = () => push(S_settings);
 }
 
 async function S_products() {
@@ -1535,13 +1709,15 @@ async function S_docs() {
 
 async function S_users() {
   const r = await api('/api/users');
-  const allRoles = [['seller', 'Продавец'], ['keeper', 'Кладовщик'], ['admin', 'Админ']];
+  const allRoles = [['seller', 'Продавец'], ['keeper', 'Кладовщик'], ['owner', 'Совладелец'],
+    ['admin', 'Админ']];
   const roles = ME.role === 'admin' ? allRoles : allRoles.slice(0, 2);
-  const roleTitle = { seller: 'Продавец', keeper: 'Кладовщик', admin: 'Админ' };
+  const roleTitle = { seller: 'Продавец', keeper: 'Кладовщик', owner: 'Совладелец',
+    admin: 'Админ' };
   const html = '<div class="card">' + r.users.map(u => {
-    const locked = ME.role !== 'admin' && u.role === 'admin';
+    const locked = ME.role !== 'admin' && (u.role === 'admin' || u.role === 'owner');
     const controls = locked
-      ? '<span class="hint small">Админ</span>'
+      ? '<span class="hint small">' + (roleTitle[u.role] || u.role) + '</span>'
       : '<select data-uid="' + u.id + '" style="width:auto;padding:6px 8px;font-size:13px">' +
         roles.map(x => '<option value="' + x[0] + '"' + (u.role === x[0] ? ' selected' : '') +
           '>' + x[1] + '</option>').join('') +
@@ -1556,7 +1732,8 @@ async function S_users() {
       controls + '</div></div>';
   }).join('') + '</div>' +
     '<div class="card hint small">Продавец видит только своё. Кладовщик — склад, выдачи, сдачи, ' +
-    'инкассации. Админ — всё, включая прибыль, расходы и наличные расчёты.</div>';
+    'инкассации, продавцов. Совладелец — как админ (прибыль, расходы, наличные), но без ' +
+    'управления пользователями и настроек. Админ — всё.</div>';
   const el = screen('Пользователи', html, true);
   el.addEventListener('change', async e => {
     const sel = e.target.closest('select[data-uid]');
@@ -1627,8 +1804,28 @@ function S_reg(tgInfo) {
   };
 }
 
+function applyInsets() {
+  // фолбэк: старые клиенты Telegram не ставят CSS-переменные safe-area сами
+  if (!tg) return;
+  const r = document.documentElement.style;
+  const sa = tg.safeAreaInset || {};
+  const csa = tg.contentSafeAreaInset || {};
+  if (sa.top != null) r.setProperty('--tg-safe-area-inset-top', sa.top + 'px');
+  if (sa.bottom != null) r.setProperty('--tg-safe-area-inset-bottom', sa.bottom + 'px');
+  if (csa.top != null) r.setProperty('--tg-content-safe-area-inset-top', csa.top + 'px');
+}
+
 async function boot() {
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+    applyInsets();
+    if (tg.onEvent) {
+      tg.onEvent('safeAreaChanged', applyInsets);
+      tg.onEvent('contentSafeAreaChanged', applyInsets);
+    }
+  }
   if (!DEV && !(tg && tg.initData)) {
     screen('', '<div class="card" style="text-align:center;padding:40px 20px">' +
       '<div style="font-size:40px;margin-bottom:10px">🛒</div>' +
