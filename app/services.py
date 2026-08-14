@@ -1,0 +1,990 @@
+"""Бизнес-логика: номенклатура, склад, выдача/сдача товара, деньги, аналитика.
+
+Денежная модель (docs.money — влияние на долг продавца, со знаком):
+  выдача:       +доля% × розничная стоимость выданного (со склада и с полки)
+  сдача:        −доля% × розничная стоимость возвращённого (на склад и на полку)
+  инкассация:   −(сумма терминала × (1 − комиссия%))
+  наличные:     −сумма (плюсовая сумма = продавец отдал нам)
+Баланс продавца = Σ money. Больше нуля — должен нам, меньше — мы ему.
+"""
+import threading
+from datetime import datetime, timezone
+
+from . import db
+
+EPS = 1e-6
+ROLES = ("seller", "keeper", "admin")
+UNITS = ("кг", "шт")
+
+_lock = threading.Lock()
+
+
+def r2(x):
+    return round(float(x) + 1e-9, 2)
+
+
+def now_utc():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _num(v, name, allow_zero=False, allow_negative=False):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"Некорректное число: {name}")
+    if x != x or abs(x) > 1e9:
+        raise ValueError(f"Некорректное число: {name}")
+    if not allow_negative and x < -EPS:
+        raise ValueError(f"{name}: не может быть отрицательным")
+    if not allow_zero and abs(x) < EPS:
+        raise ValueError(f"{name}: укажите значение больше нуля")
+    return x
+
+
+# ---------- настройки ----------
+
+def settings_get(conn):
+    s = {r["k"]: r["v"] for r in conn.execute("SELECT k, v FROM settings")}
+    return {
+        "share_pct": float(s.get("share_pct", 50)),
+        "commission_pct": float(s.get("commission_pct", 2)),
+    }
+
+
+def settings_set(conn, share_pct, commission_pct):
+    share = _num(share_pct, "Доля, %", allow_zero=True)
+    comm = _num(commission_pct, "Комиссия, %", allow_zero=True)
+    if share > 100 or comm > 100:
+        raise ValueError("Процент не может быть больше 100")
+    with _lock, conn:
+        conn.execute("INSERT OR REPLACE INTO settings(k, v) VALUES('share_pct', ?)", (str(share),))
+        conn.execute("INSERT OR REPLACE INTO settings(k, v) VALUES('commission_pct', ?)", (str(comm),))
+    return settings_get(conn)
+
+
+# ---------- пользователи ----------
+
+def user_by_tg(conn, tg_id):
+    r = conn.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def user_by_id(conn, uid):
+    r = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    return dict(r) if r else None
+
+
+def user_create(conn, tg_id, first_name, last_name, username, tz, admin_ids):
+    first_name = (first_name or "").strip()
+    last_name = (last_name or "").strip()
+    if not first_name or not last_name:
+        raise ValueError("Укажите имя и фамилию")
+    if len(first_name) > 50 or len(last_name) > 50:
+        raise ValueError("Слишком длинное имя")
+    with _lock, conn:
+        count = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+        role = "admin" if (tg_id in admin_ids or count == 0) else "seller"
+        conn.execute(
+            "INSERT INTO users(tg_id, username, first_name, last_name, role, tz, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (tg_id, username, first_name, last_name, role, tz, now_utc()),
+        )
+    return user_by_tg(conn, tg_id)
+
+
+def user_touch(conn, uid, username, tz):
+    with _lock, conn:
+        if tz:
+            conn.execute("UPDATE users SET username=?, tz=? WHERE id=?", (username, tz, uid))
+        else:
+            conn.execute("UPDATE users SET username=? WHERE id=?", (username, uid))
+
+
+def users_list(conn):
+    return [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY role, first_name")]
+
+
+def user_update(conn, uid, role=None, active=None):
+    if user_by_id(conn, uid) is None:
+        raise ValueError("Пользователь не найден")
+    with _lock, conn:
+        if role is not None:
+            if role not in ROLES:
+                raise ValueError("Неизвестная роль")
+            conn.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
+        if active is not None:
+            conn.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, uid))
+    return user_by_id(conn, uid)
+
+
+def fio(u):
+    return f"{u['first_name']} {u['last_name']}".strip()
+
+
+# ---------- номенклатура ----------
+
+def _product(conn, pid):
+    r = conn.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+    if r is None:
+        raise ValueError("Товар не найден")
+    return dict(r)
+
+
+def products_list(conn, include_archived=False):
+    q = "SELECT p.*, COALESCE(s.qty, 0) AS stock_qty FROM products p LEFT JOIN stock s ON s.product_id = p.id"
+    if not include_archived:
+        q += " WHERE p.archived = 0"
+    q += " ORDER BY p.group_name, p.name"
+    return [dict(r) for r in conn.execute(q)]
+
+
+def product_create(conn, name, unit, purchase_price, retail_price, group_name=""):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Укажите название товара")
+    if unit not in UNITS:
+        raise ValueError("Единица измерения: кг или шт")
+    pp = _num(purchase_price, "Закупочная цена", allow_zero=True)
+    rp = _num(retail_price, "Розничная цена", allow_zero=True)
+    with _lock, conn:
+        dup = conn.execute("SELECT id FROM products WHERE lower(name)=lower(?)", (name,)).fetchone()
+        if dup:
+            raise ValueError("Товар с таким названием уже есть")
+        cur = conn.execute(
+            "INSERT INTO products(name, group_name, unit, purchase_price, retail_price) VALUES(?,?,?,?,?)",
+            (name, (group_name or "").strip(), unit, pp, rp),
+        )
+        conn.execute("INSERT OR IGNORE INTO stock(product_id, qty) VALUES(?, 0)", (cur.lastrowid,))
+    return _product(conn, cur.lastrowid)
+
+
+def product_delete(conn, pid):
+    """Полное удаление, только если товар нигде не использовался."""
+    p = _product(conn, pid)
+    used = conn.execute("SELECT 1 FROM doc_lines WHERE product_id=? LIMIT 1", (pid,)).fetchone()
+    has_qty = (_stock_qty(conn, pid) > EPS or conn.execute(
+        "SELECT 1 FROM seller_stock WHERE product_id=? AND (qty_hands > ? OR qty_shelf > ?) LIMIT 1",
+        (pid, EPS, EPS)).fetchone())
+    if used or has_qty:
+        raise ValueError(f"«{p['name']}» уже участвует в документах или есть остаток — "
+                         "такой товар можно только архивировать")
+    with _lock, conn:
+        conn.execute("DELETE FROM products WHERE id=?", (pid,))
+        conn.execute("DELETE FROM stock WHERE product_id=?", (pid,))
+        conn.execute("DELETE FROM seller_stock WHERE product_id=?", (pid,))
+    return {"deleted": True}
+
+
+def product_update(conn, pid, name=None, unit=None, purchase_price=None, retail_price=None,
+                   archived=None, group_name=None):
+    _product(conn, pid)
+    with _lock, conn:
+        if name is not None:
+            name = name.strip()
+            if not name:
+                raise ValueError("Укажите название товара")
+            dup = conn.execute(
+                "SELECT id FROM products WHERE lower(name)=lower(?) AND id<>?", (name, pid)
+            ).fetchone()
+            if dup:
+                raise ValueError("Товар с таким названием уже есть")
+            conn.execute("UPDATE products SET name=? WHERE id=?", (name, pid))
+        if unit is not None:
+            if unit not in UNITS:
+                raise ValueError("Единица измерения: кг или шт")
+            conn.execute("UPDATE products SET unit=? WHERE id=?", (unit, pid))
+        if purchase_price is not None:
+            conn.execute("UPDATE products SET purchase_price=? WHERE id=?",
+                         (_num(purchase_price, "Закупочная цена", allow_zero=True), pid))
+        if retail_price is not None:
+            conn.execute("UPDATE products SET retail_price=? WHERE id=?",
+                         (_num(retail_price, "Розничная цена", allow_zero=True), pid))
+        if archived is not None:
+            conn.execute("UPDATE products SET archived=? WHERE id=?", (1 if archived else 0, pid))
+        if group_name is not None:
+            conn.execute("UPDATE products SET group_name=? WHERE id=?", (group_name.strip(), pid))
+    return _product(conn, pid)
+
+
+# ---------- поставщики ----------
+
+def suppliers_list(conn, include_archived=False):
+    q = "SELECT * FROM suppliers"
+    if not include_archived:
+        q += " WHERE archived=0"
+    return [dict(r) for r in conn.execute(q + " ORDER BY name")]
+
+
+def supplier_create(conn, name):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Укажите название поставщика")
+    with _lock, conn:
+        dup = conn.execute("SELECT id FROM suppliers WHERE lower(name)=lower(?)", (name,)).fetchone()
+        if dup:
+            raise ValueError("Такой поставщик уже есть")
+        cur = conn.execute("INSERT INTO suppliers(name) VALUES(?)", (name,))
+    return {"id": cur.lastrowid, "name": name, "archived": 0}
+
+
+def supplier_update(conn, sid, name=None, archived=None):
+    r = conn.execute("SELECT * FROM suppliers WHERE id=?", (sid,)).fetchone()
+    if r is None:
+        raise ValueError("Поставщик не найден")
+    with _lock, conn:
+        if name is not None:
+            name = name.strip()
+            if not name:
+                raise ValueError("Укажите название поставщика")
+            conn.execute("UPDATE suppliers SET name=? WHERE id=?", (name, sid))
+        if archived is not None:
+            conn.execute("UPDATE suppliers SET archived=? WHERE id=?", (1 if archived else 0, sid))
+    return dict(conn.execute("SELECT * FROM suppliers WHERE id=?", (sid,)).fetchone())
+
+
+# ---------- остатки ----------
+
+def _stock_qty(conn, pid):
+    r = conn.execute("SELECT qty FROM stock WHERE product_id=?", (pid,)).fetchone()
+    return float(r["qty"]) if r else 0.0
+
+
+def _stock_set(conn, pid, qty):
+    if qty < -EPS:
+        raise ValueError("Остаток на складе не может стать отрицательным")
+    conn.execute(
+        "INSERT INTO stock(product_id, qty) VALUES(?,?) "
+        "ON CONFLICT(product_id) DO UPDATE SET qty=excluded.qty",
+        (pid, max(qty, 0.0)),
+    )
+
+
+def _sstock(conn, seller_id, pid):
+    r = conn.execute(
+        "SELECT qty_hands, qty_shelf FROM seller_stock WHERE seller_id=? AND product_id=?",
+        (seller_id, pid),
+    ).fetchone()
+    return (float(r["qty_hands"]), float(r["qty_shelf"])) if r else (0.0, 0.0)
+
+
+def _sstock_set(conn, seller_id, pid, hands, shelf):
+    if hands < -EPS or shelf < -EPS:
+        raise ValueError("Остаток у продавца не может стать отрицательным")
+    conn.execute(
+        "INSERT INTO seller_stock(seller_id, product_id, qty_hands, qty_shelf) VALUES(?,?,?,?) "
+        "ON CONFLICT(seller_id, product_id) DO UPDATE SET qty_hands=excluded.qty_hands, "
+        "qty_shelf=excluded.qty_shelf",
+        (seller_id, pid, max(hands, 0.0), max(shelf, 0.0)),
+    )
+
+
+def seller_stock(conn, seller_id):
+    """Товар у продавца: на руках и на полке, с ценами."""
+    rows = conn.execute(
+        "SELECT ss.product_id, ss.qty_hands, ss.qty_shelf, p.name, p.unit, p.retail_price "
+        "FROM seller_stock ss JOIN products p ON p.id = ss.product_id "
+        "WHERE ss.seller_id=? AND (ss.qty_hands > ? OR ss.qty_shelf > ?) ORDER BY p.name",
+        (seller_id, EPS, EPS),
+    ).fetchall()
+    hands, shelf = [], []
+    for r in rows:
+        base = {"product_id": r["product_id"], "name": r["name"], "unit": r["unit"],
+                "retail_price": r["retail_price"]}
+        if r["qty_hands"] > EPS:
+            hands.append({**base, "qty": r["qty_hands"], "value": r2(r["qty_hands"] * r["retail_price"])})
+        if r["qty_shelf"] > EPS:
+            shelf.append({**base, "qty": r["qty_shelf"], "value": r2(r["qty_shelf"] * r["retail_price"])})
+    return {
+        "hands": hands,
+        "shelf": shelf,
+        "hands_value": r2(sum(x["value"] for x in hands)),
+        "shelf_value": r2(sum(x["value"] for x in shelf)),
+    }
+
+
+# ---------- документы ----------
+
+def _date_ok(date):
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise ValueError("Некорректная дата")
+    return date
+
+
+def _doc_insert(conn, dtype, date, created_by, seller_id=None, amount=0.0, money=0.0,
+                comment=None, supplier_id=None):
+    cur = conn.execute(
+        "INSERT INTO docs(type, ts, date, seller_id, supplier_id, created_by, amount, money, comment) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (dtype, now_utc(), date, seller_id, supplier_id, created_by, r2(amount), r2(money),
+         comment or None),
+    )
+    return cur.lastrowid
+
+
+def _line_insert(conn, doc_id, p, **f):
+    conn.execute(
+        "INSERT INTO doc_lines(doc_id, product_id, qty, qty_shelf, qty_to_wh, qty_to_shelf, "
+        "qty_sold, qty_before, purchase_price, retail_price) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (doc_id, p["id"], f.get("qty", 0), f.get("qty_shelf", 0), f.get("qty_to_wh", 0),
+         f.get("qty_to_shelf", 0), f.get("qty_sold", 0), f.get("qty_before"),
+         p["purchase_price"], p["retail_price"]),
+    )
+
+
+def _need_lines(lines):
+    if not lines or not isinstance(lines, list):
+        raise ValueError("Добавьте хотя бы одну позицию")
+
+
+def _seller_checked(conn, seller_id):
+    u = user_by_id(conn, seller_id)
+    if u is None or not u["active"]:
+        raise ValueError("Продавец не найден")
+    return u
+
+
+def doc_prihod(conn, user, date, lines, comment=None, supplier_id=None):
+    """Приход товара на склад (при желании — от поставщика)."""
+    _date_ok(date)
+    _need_lines(lines)
+    if supplier_id:
+        if conn.execute("SELECT 1 FROM suppliers WHERE id=?", (supplier_id,)).fetchone() is None:
+            raise ValueError("Поставщик не найден")
+    else:
+        supplier_id = None
+    with _lock, conn:
+        total = 0.0
+        doc_id = _doc_insert(conn, "prihod", date, user["id"], comment=comment,
+                             supplier_id=supplier_id)
+        for ln in lines:
+            p = _product(conn, ln.get("product_id"))
+            qty = _num(ln.get("qty"), p["name"])
+            _stock_set(conn, p["id"], _stock_qty(conn, p["id"]) + qty)
+            _line_insert(conn, doc_id, p, qty=qty)
+            total += qty * p["retail_price"]
+        conn.execute("UPDATE docs SET amount=? WHERE id=?", (r2(total), doc_id))
+    return doc_get(conn, doc_id)
+
+
+def doc_initial_or_inventory(conn, user, date, lines, kind, comment=None):
+    """Начальные остатки или инвентаризация: установка фактических остатков склада."""
+    if kind not in ("initial", "inventory"):
+        raise ValueError("Неизвестный тип документа")
+    _date_ok(date)
+    _need_lines(lines)
+    with _lock, conn:
+        doc_id = _doc_insert(conn, kind, date, user["id"], comment=comment)
+        total = 0.0
+        for ln in lines:
+            p = _product(conn, ln.get("product_id"))
+            fact = _num(ln.get("qty"), p["name"], allow_zero=True)
+            before = _stock_qty(conn, p["id"])
+            _stock_set(conn, p["id"], fact)
+            _line_insert(conn, doc_id, p, qty=fact, qty_before=before)
+            total += (fact - before) * p["purchase_price"]
+        # amount: для инвентаризации — сумма расхождений по закупу (может быть < 0)
+        conn.execute("UPDATE docs SET amount=? WHERE id=?", (r2(total), doc_id))
+    return doc_get(conn, doc_id)
+
+
+def doc_vydacha(conn, user, seller_id, date, lines, share_pct, comment=None):
+    """Выдача товара продавцу под реализацию (со склада и/или с его полки)."""
+    _date_ok(date)
+    _need_lines(lines)
+    _seller_checked(conn, seller_id)
+    with _lock, conn:
+        doc_id = _doc_insert(conn, "vydacha", date, user["id"], seller_id=seller_id, comment=comment)
+        total = 0.0
+        for ln in lines:
+            p = _product(conn, ln.get("product_id"))
+            q_wh = _num(ln.get("qty_wh", 0), p["name"], allow_zero=True)
+            q_shelf = _num(ln.get("qty_shelf", 0), p["name"], allow_zero=True)
+            qty = q_wh + q_shelf
+            if qty < EPS:
+                raise ValueError(f"{p['name']}: укажите количество")
+            if p["retail_price"] < EPS:
+                raise ValueError(f"{p['name']}: не задана розничная цена — "
+                                 "заполните её в номенклатуре перед выдачей")
+            if q_wh > EPS:
+                have = _stock_qty(conn, p["id"])
+                if q_wh > have + EPS:
+                    raise ValueError(f"{p['name']}: на складе только {have:g} {p['unit']}")
+                _stock_set(conn, p["id"], have - q_wh)
+            hands, shelf = _sstock(conn, seller_id, p["id"])
+            if q_shelf > shelf + EPS:
+                raise ValueError(f"{p['name']}: на полке только {shelf:g} {p['unit']}")
+            _sstock_set(conn, seller_id, p["id"], hands + qty, shelf - q_shelf)
+            _line_insert(conn, doc_id, p, qty=qty, qty_shelf=q_shelf)
+            total += qty * p["retail_price"]
+        money = total * share_pct / 100.0
+        conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?", (r2(total), r2(money), doc_id))
+    return doc_get(conn, doc_id)
+
+
+def doc_sdacha(conn, user, seller_id, date, lines, share_pct, comment=None):
+    """Сдача товара продавцом: на склад / на свою полку; остальное — продано."""
+    _date_ok(date)
+    _need_lines(lines)
+    _seller_checked(conn, seller_id)
+    with _lock, conn:
+        doc_id = _doc_insert(conn, "sdacha", date, user["id"], seller_id=seller_id, comment=comment)
+        sold_total = 0.0
+        returned_total = 0.0
+        for ln in lines:
+            p = _product(conn, ln.get("product_id"))
+            to_wh = _num(ln.get("qty_to_wh", 0), p["name"], allow_zero=True)
+            to_shelf = _num(ln.get("qty_to_shelf", 0), p["name"], allow_zero=True)
+            sold = _num(ln.get("qty_sold", 0), p["name"], allow_zero=True)
+            qty = to_wh + to_shelf + sold
+            if qty < EPS:
+                continue
+            hands, shelf = _sstock(conn, seller_id, p["id"])
+            if qty > hands + EPS:
+                raise ValueError(f"{p['name']}: у продавца на руках только {hands:g} {p['unit']}")
+            _sstock_set(conn, seller_id, p["id"], hands - qty, shelf + to_shelf)
+            if to_wh > EPS:
+                _stock_set(conn, p["id"], _stock_qty(conn, p["id"]) + to_wh)
+            _line_insert(conn, doc_id, p, qty=qty, qty_to_wh=to_wh, qty_to_shelf=to_shelf, qty_sold=sold)
+            sold_total += sold * p["retail_price"]
+            returned_total += (to_wh + to_shelf) * p["retail_price"]
+        money = -returned_total * share_pct / 100.0
+        conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
+                     (r2(sold_total), r2(money), doc_id))
+    return doc_get(conn, doc_id)
+
+
+def doc_incass(conn, user, seller_id, date, amount, commission_pct, comment=None):
+    """Инкассация: сумма терминала за день, к зачёту минус комиссия."""
+    _date_ok(date)
+    _seller_checked(conn, seller_id)
+    amt = _num(amount, "Сумма терминала")
+    credited = r2(amt * (100.0 - commission_pct) / 100.0)
+    with _lock, conn:
+        doc_id = _doc_insert(conn, "incass", date, user["id"], seller_id=seller_id,
+                             amount=amt, money=-credited, comment=comment)
+    return doc_get(conn, doc_id)
+
+
+def doc_cash(conn, user, seller_id, date, amount, comment=None):
+    """Наличный расчёт: amount > 0 — продавец отдал нам, < 0 — мы отдали продавцу."""
+    _date_ok(date)
+    _seller_checked(conn, seller_id)
+    amt = _num(amount, "Сумма", allow_negative=True)
+    with _lock, conn:
+        doc_id = _doc_insert(conn, "cash", date, user["id"], seller_id=seller_id,
+                             amount=amt, money=-amt, comment=comment)
+    return doc_get(conn, doc_id)
+
+
+def doc_get(conn, doc_id):
+    d = conn.execute(
+        "SELECT d.*, u.first_name || ' ' || u.last_name AS creator_name, "
+        "s.first_name || ' ' || s.last_name AS seller_name, sup.name AS supplier_name "
+        "FROM docs d JOIN users u ON u.id = d.created_by "
+        "LEFT JOIN users s ON s.id = d.seller_id "
+        "LEFT JOIN suppliers sup ON sup.id = d.supplier_id WHERE d.id=?",
+        (doc_id,),
+    ).fetchone()
+    if d is None:
+        raise ValueError("Документ не найден")
+    lines = [dict(r) for r in conn.execute(
+        "SELECT l.*, p.name, p.unit FROM doc_lines l JOIN products p ON p.id = l.product_id "
+        "WHERE l.doc_id=? ORDER BY p.name", (doc_id,),
+    )]
+    return {**dict(d), "lines": lines}
+
+
+def docs_list(conn, dtype=None, seller_id=None, limit=100):
+    q = ("SELECT d.*, u.first_name || ' ' || u.last_name AS creator_name, "
+         "s.first_name || ' ' || s.last_name AS seller_name, sup.name AS supplier_name "
+         "FROM docs d JOIN users u ON u.id = d.created_by "
+         "LEFT JOIN users s ON s.id = d.seller_id "
+         "LEFT JOIN suppliers sup ON sup.id = d.supplier_id WHERE 1=1")
+    args = []
+    if dtype:
+        q += " AND d.type=?"
+        args.append(dtype)
+    if seller_id:
+        q += " AND d.seller_id=?"
+        args.append(seller_id)
+    q += " ORDER BY d.id DESC LIMIT ?"
+    args.append(min(int(limit), 500))
+    return [dict(r) for r in conn.execute(q, args)]
+
+
+# ---------- деньги ----------
+
+def seller_balance(conn, seller_id):
+    rows = conn.execute(
+        "SELECT type, COALESCE(SUM(money),0) m, COALESCE(SUM(amount),0) a, COUNT(*) n "
+        "FROM docs WHERE seller_id=? GROUP BY type", (seller_id,),
+    ).fetchall()
+    by = {r["type"]: r for r in rows}
+
+    def m(t):
+        return float(by[t]["m"]) if t in by else 0.0
+
+    def a(t):
+        return float(by[t]["a"]) if t in by else 0.0
+
+    return {
+        "taken_value": r2(a("vydacha")),          # взял товара на сумму (розница)
+        "charged": r2(m("vydacha")),              # начислено (доля)
+        "returned_credit": r2(-m("sdacha")),      # зачтено возвратами товара
+        "sold_value": r2(a("sdacha")),            # продал на сумму (по сдачам)
+        "terminal_raw": r2(a("incass")),          # пробил по терминалу
+        "terminal_credit": r2(-m("incass")),      # зачтено по терминалу (минус комиссия)
+        "cash_total": r2(a("cash")),              # наличными (+ нам, − мы ему)
+        "balance": r2(sum(float(r["m"]) for r in rows)),
+    }
+
+
+def sellers_overview(conn):
+    out = []
+    for u in conn.execute(
+        "SELECT * FROM users WHERE role='seller' AND active=1 ORDER BY first_name"
+    ):
+        u = dict(u)
+        st = seller_stock(conn, u["id"])
+        bal = seller_balance(conn, u["id"])
+        out.append({
+            "id": u["id"], "name": fio(u), "balance": bal["balance"],
+            "hands_value": st["hands_value"], "shelf_value": st["shelf_value"],
+        })
+    return out
+
+
+# ---------- аналитика ----------
+
+def stock_report(conn):
+    rows = []
+    t_kg = t_pcs = t_purch = t_retail = 0.0
+    for p in conn.execute(
+        "SELECT p.*, COALESCE(s.qty,0) qty FROM products p "
+        "LEFT JOIN stock s ON s.product_id = p.id "
+        "WHERE COALESCE(s.qty,0) > ? ORDER BY p.group_name, p.name", (EPS,),
+    ):
+        qty = float(p["qty"])
+        pv, rv = r2(qty * p["purchase_price"]), r2(qty * p["retail_price"])
+        rows.append({"product_id": p["id"], "name": p["name"], "unit": p["unit"], "qty": qty,
+                     "purchase_price": p["purchase_price"], "retail_price": p["retail_price"],
+                     "purchase_value": pv, "retail_value": rv})
+        if p["unit"] == "кг":
+            t_kg += qty
+        else:
+            t_pcs += qty
+        t_purch += pv
+        t_retail += rv
+    shelf = [dict(r) for r in conn.execute(
+        "SELECT p.name, p.unit, SUM(ss.qty_shelf) qty, SUM(ss.qty_shelf * p.retail_price) value "
+        "FROM seller_stock ss JOIN products p ON p.id = ss.product_id "
+        "WHERE ss.qty_shelf > ? GROUP BY p.id ORDER BY p.name", (EPS,),
+    )]
+    return {
+        "rows": rows,
+        "totals": {"kg": r2(t_kg), "pcs": r2(t_pcs), "purchase_value": r2(t_purch),
+                   "retail_value": r2(t_retail)},
+        "shelf_rows": [{**s, "value": r2(s["value"])} for s in shelf],
+    }
+
+
+def on_sellers_report(conn):
+    out = []
+    for u in conn.execute("SELECT * FROM users WHERE role='seller' AND active=1 ORDER BY first_name"):
+        st = seller_stock(conn, u["id"])
+        if st["hands"] or st["shelf"]:
+            out.append({"seller_id": u["id"], "name": fio(dict(u)), **st})
+    return out
+
+
+def sales_report(conn, date_from, date_to, share_pct):
+    _date_ok(date_from)
+    _date_ok(date_to)
+    sellers = {}
+
+    def cell(sid, name):
+        if sid not in sellers:
+            sellers[sid] = {"seller_id": sid, "name": name, "sold_value": 0.0, "sold_kg": 0.0,
+                            "sold_pcs": 0.0, "our_share": 0.0, "terminal_raw": 0.0,
+                            "terminal_credit": 0.0, "cash": 0.0, "products": {}}
+        return sellers[sid]
+
+    for r in conn.execute(
+        "SELECT d.seller_id, s.first_name || ' ' || s.last_name AS name, l.qty_sold, "
+        "l.retail_price, p.name pname, p.unit "
+        "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
+        "JOIN products p ON p.id = l.product_id JOIN users s ON s.id = d.seller_id "
+        "WHERE d.type='sdacha' AND d.date BETWEEN ? AND ? AND l.qty_sold > ?",
+        (date_from, date_to, EPS),
+    ):
+        c = cell(r["seller_id"], r["name"])
+        val = r["qty_sold"] * r["retail_price"]
+        c["sold_value"] += val
+        if r["unit"] == "кг":
+            c["sold_kg"] += r["qty_sold"]
+        else:
+            c["sold_pcs"] += r["qty_sold"]
+        pr = c["products"].setdefault(r["pname"], {"name": r["pname"], "unit": r["unit"],
+                                                   "qty": 0.0, "value": 0.0})
+        pr["qty"] += r["qty_sold"]
+        pr["value"] += val
+
+    for r in conn.execute(
+        "SELECT d.seller_id, s.first_name || ' ' || s.last_name AS name, d.type, "
+        "SUM(d.amount) a, SUM(d.money) m FROM docs d JOIN users s ON s.id = d.seller_id "
+        "WHERE d.type IN ('incass','cash') AND d.date BETWEEN ? AND ? GROUP BY d.seller_id, d.type",
+        (date_from, date_to),
+    ):
+        c = cell(r["seller_id"], r["name"])
+        if r["type"] == "incass":
+            c["terminal_raw"] = float(r["a"])
+            c["terminal_credit"] = -float(r["m"])
+        else:
+            c["cash"] = float(r["a"])
+
+    out = []
+    for c in sellers.values():
+        c["our_share"] = r2(c["sold_value"] * share_pct / 100.0)
+        for k in ("sold_value", "sold_kg", "sold_pcs", "terminal_raw", "terminal_credit", "cash"):
+            c[k] = r2(c[k])
+        c["products"] = sorted(
+            [{**p, "qty": r2(p["qty"]), "value": r2(p["value"])} for p in c["products"].values()],
+            key=lambda x: -x["value"])
+        c["balance"] = seller_balance(conn, c["seller_id"])["balance"]
+        out.append(c)
+    out.sort(key=lambda x: -x["sold_value"])
+    totals = {
+        "sold_value": r2(sum(c["sold_value"] for c in out)),
+        "sold_kg": r2(sum(c["sold_kg"] for c in out)),
+        "our_share": r2(sum(c["our_share"] for c in out)),
+        "terminal_credit": r2(sum(c["terminal_credit"] for c in out)),
+        "cash": r2(sum(c["cash"] for c in out)),
+    }
+    return {"sellers": out, "totals": totals}
+
+
+# ---------- мероприятия и точки ----------
+
+def people_list(conn):
+    """Короткий список всех активных пользователей — для выбора «кто ездит»."""
+    return [{"id": r["id"], "name": f"{r['first_name']} {r['last_name']}".strip()}
+            for r in conn.execute(
+                "SELECT id, first_name, last_name FROM users WHERE active=1 ORDER BY first_name")]
+
+
+def _owner_ok(conn, owner_user_id):
+    if owner_user_id in (None, 0, ""):
+        return None
+    if conn.execute("SELECT 1 FROM users WHERE id=?", (owner_user_id,)).fetchone() is None:
+        raise ValueError("Пользователь не найден")
+    return owner_user_id
+
+
+_PLACE_SELECT = (
+    "SELECT t.*, o.first_name || ' ' || o.last_name AS owner_name, "
+    "c.first_name || ' ' || c.last_name AS creator_name "
+    "FROM {table} t LEFT JOIN users o ON o.id = t.owner_user_id "
+    "LEFT JOIN users c ON c.id = t.created_by"
+)
+
+
+def events_list(conn, city=None, when="upcoming", today=None):
+    q = _PLACE_SELECT.format(table="events") + " WHERE 1=1"
+    args = []
+    if city:
+        q += " AND t.city = ?"
+        args.append(city)
+    if when == "upcoming" and today:
+        q += " AND COALESCE(t.date_to, t.date_from) >= ?"
+        args.append(today)
+    elif when == "past" and today:
+        q += " AND COALESCE(t.date_to, t.date_from) < ?"
+        args.append(today)
+    order = " ORDER BY t.date_from" + (" DESC" if when == "past" else "")
+    rows = [dict(r) for r in conn.execute(q + order + " LIMIT 500", args)]
+    return _attach_bookings(conn, "event", rows, today or "2000-01-01")
+
+
+def event_save(conn, user, event_id, name, etype, city, date_from, date_to,
+               owner_user_id, comment):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Укажите название мероприятия")
+    _date_ok(date_from)
+    date_to = (date_to or "").strip() or None
+    if date_to:
+        _date_ok(date_to)
+        if date_to < date_from:
+            raise ValueError("Дата окончания раньше даты начала")
+    owner = _owner_ok(conn, owner_user_id)
+    vals = (name, (etype or "").strip(), (city or "").strip(), date_from, date_to,
+            owner, (comment or "").strip() or None)
+    with _lock, conn:
+        if event_id:
+            if conn.execute("SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone() is None:
+                raise ValueError("Мероприятие не найдено")
+            conn.execute(
+                "UPDATE events SET name=?, etype=?, city=?, date_from=?, date_to=?, "
+                "owner_user_id=?, comment=? WHERE id=?", vals + (event_id,))
+        else:
+            cur = conn.execute(
+                "INSERT INTO events(name, etype, city, date_from, date_to, owner_user_id, "
+                "comment, created_by, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                vals + (user["id"], now_utc()))
+            event_id = cur.lastrowid
+    r = conn.execute(_PLACE_SELECT.format(table="events") + " WHERE t.id=?", (event_id,)).fetchone()
+    return dict(r)
+
+
+def event_delete(conn, user, event_id):
+    r = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+    if r is None:
+        raise ValueError("Мероприятие не найдено")
+    if user["role"] != "admin" and r["created_by"] != user["id"]:
+        raise ValueError("Удалить может админ или тот, кто добавил")
+    with _lock, conn:
+        conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+    return {"deleted": True}
+
+
+def points_list(conn, ptype=None, city=None, today=None):
+    q = _PLACE_SELECT.format(table="points") + " WHERE 1=1"
+    args = []
+    if ptype:
+        q += " AND t.ptype = ?"
+        args.append(ptype)
+    if city:
+        q += " AND t.city = ?"
+        args.append(city)
+    rows = [dict(r) for r in conn.execute(q + " ORDER BY t.city, t.name LIMIT 1000", args)]
+    return _attach_bookings(conn, "point", rows, today or "2000-01-01")
+
+
+def point_save(conn, user, point_id, name, ptype, city, address, owner_user_id, comment):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Укажите название точки")
+    owner = _owner_ok(conn, owner_user_id)
+    vals = (name, (ptype or "").strip(), (city or "").strip(),
+            (address or "").strip() or None, owner, (comment or "").strip() or None)
+    with _lock, conn:
+        if point_id:
+            if conn.execute("SELECT 1 FROM points WHERE id=?", (point_id,)).fetchone() is None:
+                raise ValueError("Точка не найдена")
+            conn.execute(
+                "UPDATE points SET name=?, ptype=?, city=?, address=?, owner_user_id=?, "
+                "comment=? WHERE id=?", vals + (point_id,))
+        else:
+            cur = conn.execute(
+                "INSERT INTO points(name, ptype, city, address, owner_user_id, comment, "
+                "created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                vals + (user["id"], now_utc()))
+            point_id = cur.lastrowid
+    r = conn.execute(_PLACE_SELECT.format(table="points") + " WHERE t.id=?", (point_id,)).fetchone()
+    return dict(r)
+
+
+def point_delete(conn, user, point_id):
+    r = conn.execute("SELECT * FROM points WHERE id=?", (point_id,)).fetchone()
+    if r is None:
+        raise ValueError("Точка не найдена")
+    if user["role"] != "admin" and r["created_by"] != user["id"]:
+        raise ValueError("Удалить может админ или тот, кто добавил")
+    with _lock, conn:
+        conn.execute("DELETE FROM points WHERE id=?", (point_id,))
+    return {"deleted": True}
+
+
+def bookings_list(conn, kind, ref_id, today=None):
+    if kind not in ("point", "event"):
+        raise ValueError("Неизвестный тип брони")
+    q = ("SELECT b.*, u.first_name || ' ' || u.last_name AS user_name "
+         "FROM bookings b JOIN users u ON u.id = b.user_id "
+         "WHERE b.kind=? AND b.ref_id=?")
+    args = [kind, ref_id]
+    if today:
+        q += " AND b.date_to >= ?"
+        args.append(today)
+    return [dict(r) for r in conn.execute(q + " ORDER BY b.date_from", args)]
+
+
+def booking_create(conn, user, kind, ref_id, user_id, date_from, date_to, comment=None):
+    if kind not in ("point", "event"):
+        raise ValueError("Неизвестный тип брони")
+    table = "points" if kind == "point" else "events"
+    if conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (ref_id,)).fetchone() is None:
+        raise ValueError("Точка или мероприятие не найдены")
+    u = user_by_id(conn, user_id or user["id"])
+    if u is None:
+        raise ValueError("Пользователь не найден")
+    _date_ok(date_from)
+    date_to = (date_to or "").strip() or date_from
+    _date_ok(date_to)
+    if date_to < date_from:
+        raise ValueError("Дата окончания раньше даты начала")
+    clash = conn.execute(
+        "SELECT b.*, x.first_name || ' ' || x.last_name AS user_name FROM bookings b "
+        "JOIN users x ON x.id = b.user_id "
+        "WHERE b.kind=? AND b.ref_id=? AND b.date_from <= ? AND b.date_to >= ? LIMIT 1",
+        (kind, ref_id, date_to, date_from),
+    ).fetchone()
+    if clash:
+        raise ValueError(f"Уже забронировано: {clash['user_name']} "
+                         f"({clash['date_from']} – {clash['date_to']})")
+    with _lock, conn:
+        cur = conn.execute(
+            "INSERT INTO bookings(kind, ref_id, user_id, date_from, date_to, comment, "
+            "created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (kind, ref_id, u["id"], date_from, date_to, (comment or "").strip() or None,
+             user["id"], now_utc()),
+        )
+    return {"id": cur.lastrowid}
+
+
+def booking_delete(conn, user, booking_id):
+    r = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+    if r is None:
+        raise ValueError("Бронь не найдена")
+    if user["role"] != "admin" and r["created_by"] != user["id"] and r["user_id"] != user["id"]:
+        raise ValueError("Снять бронь может админ, кто бронировал или на кого бронь")
+    with _lock, conn:
+        conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
+    return {"deleted": True}
+
+
+def _attach_bookings(conn, kind, rows, today):
+    """Дописывает каждой точке/мероприятию ближайшие активные брони."""
+    if not rows:
+        return rows
+    ids = [r["id"] for r in rows]
+    marks = ",".join("?" * len(ids))
+    by_ref = {}
+    for b in conn.execute(
+        "SELECT b.ref_id, b.date_from, b.date_to, u.first_name || ' ' || u.last_name AS user_name "
+        f"FROM bookings b JOIN users u ON u.id = b.user_id "
+        f"WHERE b.kind=? AND b.ref_id IN ({marks}) AND b.date_to >= ? ORDER BY b.date_from",
+        [kind] + ids + [today],
+    ):
+        by_ref.setdefault(b["ref_id"], []).append(dict(b))
+    for r in rows:
+        r["bookings"] = by_ref.get(r["id"], [])
+    return rows
+
+
+def places_cities(conn):
+    cities = set()
+    for r in conn.execute("SELECT DISTINCT city FROM events WHERE city<>''"):
+        cities.add(r["city"])
+    for r in conn.execute("SELECT DISTINCT city FROM points WHERE city<>''"):
+        cities.add(r["city"])
+    return sorted(cities)
+
+
+# ---------- расходы и прибыль ----------
+
+def expense_add(conn, user, date, category, amount, comment=None):
+    _date_ok(date)
+    amt = _num(amount, "Сумма расхода")
+    category = (category or "").strip() or "Прочее"
+    with _lock, conn:
+        cur = conn.execute(
+            "INSERT INTO expenses(ts, date, category, amount, comment, created_by) "
+            "VALUES(?,?,?,?,?,?)",
+            (now_utc(), date, category, r2(amt), (comment or "").strip() or None, user["id"]),
+        )
+    r = conn.execute("SELECT * FROM expenses WHERE id=?", (cur.lastrowid,)).fetchone()
+    return dict(r)
+
+
+def expenses_list(conn, date_from, date_to):
+    _date_ok(date_from)
+    _date_ok(date_to)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT e.*, u.first_name || ' ' || u.last_name AS creator_name FROM expenses e "
+        "JOIN users u ON u.id = e.created_by "
+        "WHERE e.date BETWEEN ? AND ? ORDER BY e.date DESC, e.id DESC",
+        (date_from, date_to),
+    )]
+    by_cat = {}
+    for r in rows:
+        by_cat[r["category"]] = by_cat.get(r["category"], 0.0) + r["amount"]
+    return {
+        "expenses": rows,
+        "total": r2(sum(r["amount"] for r in rows)),
+        "by_category": [{"category": k, "amount": r2(v)}
+                        for k, v in sorted(by_cat.items(), key=lambda x: -x[1])],
+    }
+
+
+def expense_delete(conn, eid):
+    if conn.execute("SELECT 1 FROM expenses WHERE id=?", (eid,)).fetchone() is None:
+        raise ValueError("Расход не найден")
+    with _lock, conn:
+        conn.execute("DELETE FROM expenses WHERE id=?", (eid,))
+    return {"deleted": True}
+
+
+def profit_report(conn, date_from, date_to, share_pct):
+    """Чистая прибыль за период.
+
+    Оборот = продано по рознице (по сдачам). Наша выручка = доля от оборота.
+    Себестоимость проданного — по закупочным ценам на момент выдачи (снимок в строках сдачи).
+    Плюс результат инвентаризаций (недостачи/излишки по закупу), минус прочие расходы.
+    Комиссия терминала прибыль не трогает — её несёт продавец.
+    """
+    _date_ok(date_from)
+    _date_ok(date_to)
+    r = conn.execute(
+        "SELECT COALESCE(SUM(l.qty_sold * l.retail_price),0) sold, "
+        "COALESCE(SUM(l.qty_sold * l.purchase_price),0) cogs "
+        "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
+        "WHERE d.type='sdacha' AND d.date BETWEEN ? AND ?",
+        (date_from, date_to),
+    ).fetchone()
+    turnover = float(r["sold"])
+    cogs = float(r["cogs"])
+    revenue = turnover * share_pct / 100.0
+    inv = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) a FROM docs "
+        "WHERE type='inventory' AND date BETWEEN ? AND ?",
+        (date_from, date_to),
+    ).fetchone()
+    inventory_delta = float(inv["a"])
+    exp = expenses_list(conn, date_from, date_to)
+    profit = revenue - cogs + inventory_delta - exp["total"]
+    return {
+        "turnover": r2(turnover),
+        "revenue": r2(revenue),
+        "cogs": r2(cogs),
+        "gross_profit": r2(revenue - cogs),
+        "inventory_delta": r2(inventory_delta),
+        "expenses_total": exp["total"],
+        "expenses_by_category": exp["by_category"],
+        "net_profit": r2(profit),
+        "margin_pct": r2(profit / turnover * 100.0) if turnover > EPS else 0.0,
+        "margin_of_revenue_pct": r2(profit / revenue * 100.0) if revenue > EPS else 0.0,
+    }
+
+
+# ---------- напоминания ----------
+
+def hands_nonzero(conn, seller_id):
+    r = conn.execute(
+        "SELECT COALESCE(SUM(qty_hands),0) q FROM seller_stock WHERE seller_id=?", (seller_id,)
+    ).fetchone()
+    return float(r["q"]) > EPS
+
+
+def incass_exists(conn, seller_id, date):
+    r = conn.execute(
+        "SELECT 1 FROM docs WHERE type='incass' AND seller_id=? AND date=? LIMIT 1",
+        (seller_id, date),
+    ).fetchone()
+    return r is not None
+
+
+def mark_reminded(conn, uid, local_date):
+    with _lock, conn:
+        conn.execute("UPDATE users SET last_reminded=? WHERE id=?", (local_date, uid))
