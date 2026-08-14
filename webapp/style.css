@@ -96,9 +96,11 @@ details.doc .doclines{ padding:0 14px 12px; }
 .calwrap{ position:relative; margin-bottom:10px; }
 .calbar{ display:flex; align-items:center; background:var(--card); border-radius:16px;
   padding:8px 30px 8px 30px; }
-.calmonth{ writing-mode:vertical-rl; transform:rotate(180deg); font-size:11px;
-  color:var(--hint); font-weight:700; flex:none; margin-right:4px; text-transform:capitalize;
+.calmonth{ writing-mode:vertical-rl; transform:rotate(180deg); font-size:13px;
+  color:var(--text); font-weight:800; flex:none; margin-right:4px; text-transform:capitalize;
   min-height:44px; text-align:center; }
+.ditem .dm{ font-size:11px; color:var(--red); font-weight:800; }
+.ditem.sel .dm{ color:var(--accent-text); }
 .dstrip{ display:flex; overflow-x:auto; gap:2px; flex:1; scroll-behavior:smooth;
   -webkit-overflow-scrolling:touch; scrollbar-width:none; }
 .dstrip::-webkit-scrollbar{ display:none; }

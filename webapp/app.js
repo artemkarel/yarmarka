@@ -905,13 +905,11 @@ function startOfWeek(d) {
 function calDefaultKey(mode) {
   const t = new Date();
   if (mode === 'day') return today();
-  if (mode === 'week') return isoDate(startOfWeek(t));
   return isoDate(new Date(t.getFullYear(), t.getMonth(), 1));
 }
 function calPeriod(mode, key) {
   const d = new Date(key + 'T00:00:00');
   if (mode === 'day') return { from: key, to: key };
-  if (mode === 'week') return { from: key, to: isoDate(addDays(d, 6)) };
   return { from: key, to: isoDate(new Date(d.getFullYear(), d.getMonth() + 1, 0)) };
 }
 function calItems(mode) {
@@ -921,16 +919,12 @@ function calItems(mode) {
     const t0 = new Date(t.getFullYear(), t.getMonth(), t.getDate());
     for (let i = -30; i <= 120; i++) {
       const d = addDays(t0, i);
+      const first = d.getDate() === 1;
       out.push({ key: isoDate(d), dw: RU_DW[d.getDay()],
-        we: d.getDay() === 0 || d.getDay() === 6, dn: String(d.getDate()),
+        we: d.getDay() === 0 || d.getDay() === 6,
+        dn: String(d.getDate()) +
+          (first ? ' <span class="dm">' + RU_M_SHORT[d.getMonth()] + '</span>' : ''),
         month: RU_M_SHORT[d.getMonth()] });
-    }
-  } else if (mode === 'week') {
-    const w0 = startOfWeek(t);
-    for (let i = -8; i <= 30; i++) {
-      const a = addDays(w0, i * 7), b = addDays(a, 6);
-      out.push({ key: isoDate(a), dw: 'нед', we: false,
-        dn: a.getDate() + '–' + b.getDate(), month: RU_M_SHORT[a.getMonth()], wide: true });
     }
   } else {
     for (let i = -3; i <= 14; i++) {
@@ -1031,9 +1025,9 @@ async function S_places() {
         '<div class="dw' + (it.we ? ' we' : '') + '">' + it.dw + '</div>' +
         '<div class="dn">' + it.dn + '</div></div>';
     }).join('');
-    const modes = [['day', 'По дням'], ['week', 'По неделям'], ['month', 'По месяцам']];
+    const modes = [['day', 'По дням'], ['month', 'По месяцам']];
     calHtml =
-      '<div class="seg seg3" id="cal-mode">' + modes.map(m =>
+      '<div class="seg" id="cal-mode">' + modes.map(m =>
         '<button' + (PL_STATE.calMode === m[0] ? ' class="on"' : '') + ' data-mode="' + m[0] +
         '">' + m[1] + '</button>').join('') + '</div>' +
       '<div class="calwrap"><div class="calbar">' +
