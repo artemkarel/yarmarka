@@ -892,7 +892,58 @@ async function S_analytics() {
 }
 
 // ===== мероприятия и точки =====
-const PL_STATE = { seg: 'events', when: 'upcoming', city: '', ptype: '' };
+const PL_STATE = { seg: 'events', city: '', ptype: '', calMode: 'day', selKey: null };
+const RU_M_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт',
+  'ноя', 'дек'];
+const RU_DW = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+
+function addDays(d, n) { return new Date(d.getTime() + n * 864e5); }
+function startOfWeek(d) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  return addDays(x, -((x.getDay() + 6) % 7));
+}
+function calDefaultKey(mode) {
+  const t = new Date();
+  if (mode === 'day') return today();
+  if (mode === 'week') return isoDate(startOfWeek(t));
+  return isoDate(new Date(t.getFullYear(), t.getMonth(), 1));
+}
+function calPeriod(mode, key) {
+  const d = new Date(key + 'T00:00:00');
+  if (mode === 'day') return { from: key, to: key };
+  if (mode === 'week') return { from: key, to: isoDate(addDays(d, 6)) };
+  return { from: key, to: isoDate(new Date(d.getFullYear(), d.getMonth() + 1, 0)) };
+}
+function calItems(mode) {
+  const out = [];
+  const t = new Date();
+  if (mode === 'day') {
+    const t0 = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+    for (let i = -30; i <= 120; i++) {
+      const d = addDays(t0, i);
+      out.push({ key: isoDate(d), dw: RU_DW[d.getDay()],
+        we: d.getDay() === 0 || d.getDay() === 6, dn: String(d.getDate()),
+        month: RU_M_SHORT[d.getMonth()] });
+    }
+  } else if (mode === 'week') {
+    const w0 = startOfWeek(t);
+    for (let i = -8; i <= 30; i++) {
+      const a = addDays(w0, i * 7), b = addDays(a, 6);
+      out.push({ key: isoDate(a), dw: 'нед', we: false,
+        dn: a.getDate() + '–' + b.getDate(), month: RU_M_SHORT[a.getMonth()], wide: true });
+    }
+  } else {
+    for (let i = -3; i <= 14; i++) {
+      const d = new Date(t.getFullYear(), t.getMonth() + i, 1);
+      out.push({ key: isoDate(d), dw: String(d.getFullYear()), we: false,
+        dn: RU_M_SHORT[d.getMonth()], month: '', wide: true });
+    }
+  }
+  return out;
+}
+function evIntersects(ev, p) {
+  return ev.date_from <= p.to && (ev.date_to || ev.date_from) >= p.from;
+}
 const P_TYPES = ['Праздник', 'Рынок', 'ТЦ', 'Сеть', 'Магазин', 'Другое'];
 const E_TYPES = ['Праздник', 'Ярмарка', 'Фестиваль', 'Другое'];
 
@@ -961,20 +1012,51 @@ async function S_places() {
   const cityOpts = '<option value="">Все города</option>' + meta.cities.map(c =>
     '<option' + (PL_STATE.city === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('');
   let listHtml = '';
+  let calHtml = '';
+  let allEvents = [];
   if (isEv) {
-    const r = await api('/api/events?when=' + PL_STATE.when +
-      '&city=' + encodeURIComponent(PL_STATE.city));
-    listHtml = r.events.length ? r.events.map(ev => {
+    allEvents = (await api('/api/events?when=all')).events;
+    let evs = allEvents;
+    if (PL_STATE.city) evs = evs.filter(x => x.city === PL_STATE.city);
+    if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
+    const items = calItems(PL_STATE.calMode);
+    if (!items.some(it => it.key === PL_STATE.selKey)) {
+      PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
+    }
+    const strip = items.map(it => {
+      const has = evs.some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, it.key)));
+      return '<div class="ditem' + (it.wide ? ' wide' : '') +
+        (it.key === PL_STATE.selKey ? ' sel' : '') + (has ? '' : ' off') +
+        '" data-cal="' + it.key + '" data-month="' + it.month + '">' +
+        '<div class="dw' + (it.we ? ' we' : '') + '">' + it.dw + '</div>' +
+        '<div class="dn">' + it.dn + '</div></div>';
+    }).join('');
+    const modes = [['day', 'По дням'], ['week', 'По неделям'], ['month', 'По месяцам']];
+    calHtml =
+      '<div class="seg seg3" id="cal-mode">' + modes.map(m =>
+        '<button' + (PL_STATE.calMode === m[0] ? ' class="on"' : '') + ' data-mode="' + m[0] +
+        '">' + m[1] + '</button>').join('') + '</div>' +
+      '<div class="calwrap"><div class="calbar">' +
+      '<div class="calmonth" id="cal-month"></div>' +
+      '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
+      '<button class="calarr left" id="cal-prev">‹</button>' +
+      '<button class="calarr right" id="cal-next">›</button></div>';
+    const per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
+    const inSel = evs.filter(ev => evIntersects(ev, per))
+      .sort((a, b) => a.date_from < b.date_from ? -1 : 1);
+    listHtml = inSel.length ? inSel.map(ev => {
       const dates = dstr(ev.date_from) +
         (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
+      const shortComment = ev.comment && ev.comment.length > 90
+        ? ev.comment.slice(0, 90) + '…' : ev.comment;
       return '<div class="card" data-eid="' + ev.id + '" style="cursor:pointer">' +
         '<div class="dochead"><div><b>' + esc(ev.name) + '</b></div>' +
         '<div class="dt">' + dates + '</div></div>' +
         '<div class="sub hint small">' + [esc(ev.etype), esc(ev.city)].filter(Boolean).join(' • ') +
         '</div><div class="sub small" style="margin-top:4px">' + ownerLine(ev) +
-        (ev.comment ? ' • <span class="hint">' + esc(ev.comment) + '</span>' : '') +
+        (shortComment ? ' • <span class="hint">' + esc(shortComment) + '</span>' : '') +
         '</div>' + bookingsLine(ev) + '</div>';
-    }).join('') : '<div class="card hint">Мероприятий нет — добавь первое!</div>';
+    }).join('') : '<div class="card hint">На выбранный период мероприятий нет</div>';
   } else {
     const r = await api('/api/points?ptype=' + encodeURIComponent(PL_STATE.ptype) +
       '&city=' + encodeURIComponent(PL_STATE.city));
@@ -988,18 +1070,15 @@ async function S_places() {
       '" style="margin:10px 0 0;padding:10px">Забронировать</button></div>').join('')
       : '<div class="card hint">Точек нет — добавь первую!</div>';
   }
-  const whenChips = isEv
-    ? '<div class="chips">' + [['upcoming', 'Ближайшие'], ['past', 'Прошедшие'], ['all', 'Все']]
-      .map(w => '<button class="chip' + (PL_STATE.when === w[0] ? ' on' : '') +
-        '" data-when="' + w[0] + '">' + w[1] + '</button>').join('') + '</div>'
-    : '<div class="chips">' + [['', 'Все']].concat(P_TYPES.map(t => [t, t]))
+  const typeChips = isEv ? '' :
+    '<div class="chips">' + [['', 'Все']].concat(P_TYPES.map(t => [t, t]))
       .map(w => '<button class="chip' + (PL_STATE.ptype === w[0] ? ' on' : '') +
         '" data-ptype="' + w[0] + '">' + w[1] + '</button>').join('') + '</div>';
   const html =
     '<div class="seg" id="pl-seg"><button' + (isEv ? ' class="on"' : '') +
     '>📅 Мероприятия</button><button' + (!isEv ? ' class="on"' : '') + '>📍 Точки</button></div>' +
     '<button class="btn" id="pl-add">+ Добавить ' + (isEv ? 'мероприятие' : 'точку') + '</button>' +
-    whenChips +
+    calHtml + typeChips +
     '<div class="field"><select id="pl-city">' + cityOpts + '</select></div>' +
     listHtml;
   const el = screen('Точки и события', html);
@@ -1011,15 +1090,53 @@ async function S_places() {
   el.querySelector('#pl-city').addEventListener('change', e => {
     PL_STATE.city = e.target.value; render();
   });
+  if (isEv) {
+    const stripEl = el.querySelector('#cal-strip');
+    const monthEl = el.querySelector('#cal-month');
+    const updMonth = () => {
+      let label = '';
+      for (const c of stripEl.children) {
+        if (c.offsetLeft - stripEl.offsetLeft + c.offsetWidth - stripEl.scrollLeft > 8) {
+          label = c.dataset.month || c.querySelector('.dw').textContent;
+          break;
+        }
+      }
+      monthEl.textContent = label;
+    };
+    stripEl.addEventListener('scroll', () => {
+      clearTimeout(stripEl._t);
+      stripEl._t = setTimeout(updMonth, 80);
+    });
+    const sel = stripEl.querySelector('.ditem.sel');
+    if (sel) {
+      stripEl.style.scrollBehavior = 'auto';
+      sel.scrollIntoView({ inline: 'center', block: 'nearest' });
+      stripEl.style.scrollBehavior = '';
+      window.scrollTo(0, 0);
+    }
+    updMonth();
+    el.querySelector('#cal-prev').onclick = () => {
+      stripEl.scrollLeft -= stripEl.clientWidth * 0.8;
+    };
+    el.querySelector('#cal-next').onclick = () => {
+      stripEl.scrollLeft += stripEl.clientWidth * 0.8;
+    };
+    el.querySelector('#cal-mode').addEventListener('click', e => {
+      const b = e.target.closest('[data-mode]');
+      if (!b) return;
+      PL_STATE.calMode = b.dataset.mode;
+      PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
+      render();
+    });
+  }
   el.addEventListener('click', e => {
-    const w = e.target.closest('[data-when]');
-    if (w) { PL_STATE.when = w.dataset.when; render(); return; }
+    const cal = e.target.closest('[data-cal]');
+    if (cal) { PL_STATE.selKey = cal.dataset.cal; render(); return; }
     const pt = e.target.closest('[data-ptype]');
     if (pt) { PL_STATE.ptype = pt.dataset.ptype; render(); return; }
     const ec = e.target.closest('[data-eid]');
     if (ec) {
-      api('/api/events?when=all').then(r =>
-        push(S_eventEdit, r.events.find(x => x.id === +ec.dataset.eid), meta));
+      push(S_eventEdit, allEvents.find(x => x.id === +ec.dataset.eid), meta);
       return;
     }
     const bk = e.target.closest('[data-book]');

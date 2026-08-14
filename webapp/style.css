@@ -93,6 +93,30 @@ details.doc .doclines{ padding:0 14px 12px; }
   overflow-y:auto; }
 .picker > *{ max-width:640px; margin-left:auto; margin-right:auto; }
 
+.calwrap{ position:relative; margin-bottom:10px; }
+.calbar{ display:flex; align-items:center; background:var(--card); border-radius:16px;
+  padding:8px 30px 8px 30px; }
+.calmonth{ writing-mode:vertical-rl; transform:rotate(180deg); font-size:11px;
+  color:var(--hint); font-weight:700; flex:none; margin-right:4px; text-transform:capitalize;
+  min-height:44px; text-align:center; }
+.dstrip{ display:flex; overflow-x:auto; gap:2px; flex:1; scroll-behavior:smooth;
+  -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+.dstrip::-webkit-scrollbar{ display:none; }
+.ditem{ flex:none; min-width:46px; padding:6px 4px; border-radius:12px; text-align:center;
+  cursor:pointer; }
+.ditem.wide{ min-width:82px; }
+.ditem .dw{ font-size:11px; color:var(--hint); font-weight:600; }
+.ditem .dw.we{ color:var(--red); }
+.ditem .dn{ font-size:19px; font-weight:800; margin-top:1px; white-space:nowrap; }
+.ditem.off .dn{ color:var(--hint); opacity:.45; font-weight:600; }
+.ditem.sel{ background:var(--accent); }
+.ditem.sel .dn, .ditem.sel .dw{ color:var(--accent-text); opacity:1; }
+.calarr{ position:absolute; top:50%; transform:translateY(-50%); width:26px; height:46px;
+  border:none; border-radius:12px; background:var(--card); font-size:17px; color:var(--text);
+  cursor:pointer; z-index:2; box-shadow:0 1px 8px rgba(0,0,0,.14); padding:0; }
+.calarr.left{ left:-3px; } .calarr.right{ right:-3px; }
+.seg.seg3{ grid-template-columns:repeat(3,1fr); }
+
 #nav{ position:fixed; bottom:0; left:0; right:0; background:var(--card);
   border-top:1px solid var(--sep); display:flex; z-index:10;
   padding-bottom:env(safe-area-inset-bottom); }

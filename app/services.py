@@ -703,7 +703,7 @@ def events_list(conn, city=None, when="upcoming", today=None):
         q += " AND COALESCE(t.date_to, t.date_from) < ?"
         args.append(today)
     order = " ORDER BY t.date_from" + (" DESC" if when == "past" else "")
-    rows = [dict(r) for r in conn.execute(q + order + " LIMIT 500", args)]
+    rows = [dict(r) for r in conn.execute(q + order + " LIMIT 2000", args)]
     return _attach_bookings(conn, "event", rows, today or "2000-01-01")
 
 
