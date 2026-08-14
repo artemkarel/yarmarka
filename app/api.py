@@ -417,7 +417,7 @@ def api_point_save(request: Request, payload: dict = Body(...)):
     return {"point": services.point_save(
         db.get(), u, payload.get("id"), payload.get("name"), payload.get("ptype"),
         payload.get("city"), payload.get("address"), payload.get("owner_user_id"),
-        payload.get("comment"))}
+        payload.get("comment"), payload.get("phone"), payload.get("email"))}
 
 
 @app.delete("/api/points/{pid}")

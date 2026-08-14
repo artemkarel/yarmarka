@@ -980,13 +980,12 @@ async function S_places() {
       '&city=' + encodeURIComponent(PL_STATE.city));
     listHtml = r.points.length ? r.points.map(pt =>
       '<div class="card" data-ptid="' + pt.id + '" style="cursor:pointer">' +
-      '<div class="dochead"><div><b>' + esc(pt.name) + '</b></div>' +
-      '<div class="dt">' + esc(pt.ptype) + '</div></div>' +
+      '<div><b>' + esc(pt.name) + '</b></div>' +
       '<div class="sub hint small">' +
-      [esc(pt.city), esc(pt.address || '')].filter(Boolean).join(' • ') + '</div>' +
-      '<div class="sub small" style="margin-top:4px">' + ownerLine(pt) +
-      (pt.comment ? ' • <span class="hint">' + esc(pt.comment) + '</span>' : '') +
-      '</div>' + bookingsLine(pt) + '</div>').join('')
+      ([esc(pt.address || ''), esc(pt.city)].filter(Boolean).join(', ') || 'адрес не указан') +
+      '</div>' + bookingsLine(pt) +
+      '<button class="btn secondary" data-book="' + pt.id +
+      '" style="margin:10px 0 0;padding:10px">Забронировать</button></div>').join('')
       : '<div class="card hint">Точек нет — добавь первую!</div>';
   }
   const whenChips = isEv
@@ -1023,10 +1022,12 @@ async function S_places() {
         push(S_eventEdit, r.events.find(x => x.id === +ec.dataset.eid), meta));
       return;
     }
+    const bk = e.target.closest('[data-book]');
     const pc = e.target.closest('[data-ptid]');
-    if (pc) {
+    if (bk || pc) {
+      const pid = +(bk ? bk.dataset.book : pc.dataset.ptid);
       api('/api/points').then(r =>
-        push(S_pointEdit, r.points.find(x => x.id === +pc.dataset.ptid), meta));
+        push(S_pointEdit, r.points.find(x => x.id === pid), meta, !!bk));
     }
   });
 }
@@ -1091,25 +1092,49 @@ async function S_eventEdit(ev, meta) {
   };
 }
 
-async function S_pointEdit(pt, meta) {
+async function S_pointEdit(pt, meta, scrollToBooking) {
+  const contacts = pt
+    ? '<div class="card"><h3>📞 Контакты точки</h3>' +
+      '<div class="row"><div class="l hint">Телефон</div><div class="r val">' +
+      (pt.phone ? '<a href="tel:' + esc(pt.phone) + '">' + esc(pt.phone) + '</a>'
+        : '<span class="hint">не указан</span>') + '</div></div>' +
+      '<div class="row"><div class="l hint">Почта</div><div class="r val">' +
+      (pt.email ? '<a href="mailto:' + esc(pt.email) + '">' + esc(pt.email) + '</a>'
+        : '<span class="hint">не указана</span>') + '</div></div>' +
+      '<div class="row"><div class="l hint">Чья точка</div><div class="r val">' +
+      (pt.owner_name ? esc(pt.owner_name) : '<span class="green">свободна</span>') +
+      '</div></div>' +
+      (pt.comment ? '<div class="hint small" style="margin-top:6px">' + esc(pt.comment) +
+        '</div>' : '') + '</div>'
+    : '';
   const html =
+    contacts +
+    (pt ? '<div class="card" id="bk-box"></div>' : '') +
+    '<div class="card"><h3>' + (pt ? '✏️ Редактировать' : 'Данные точки') + '</h3>' +
     '<div class="field"><label>Название</label><input id="po-name" value="' +
     esc(pt ? pt.name : '') + '"></div>' +
+    '<div class="field"><label>Адрес</label><input id="po-addr" value="' +
+    esc(pt ? pt.address || '' : '') + '"></div>' +
+    '<div class="grid2">' +
+    '<div class="field"><label>Телефон</label><input id="po-phone" inputmode="tel" value="' +
+    esc(pt ? pt.phone || '' : '') + '"></div>' +
+    '<div class="field"><label>Почта</label><input id="po-email" inputmode="email" value="' +
+    esc(pt ? pt.email || '' : '') + '"></div></div>' +
     '<div class="field"><label>Тип</label><input id="po-type" list="po-types" value="' +
     esc(pt ? pt.ptype : '') + '" placeholder="Рынок, ТЦ, сеть…"><datalist id="po-types">' +
     P_TYPES.map(t => '<option value="' + t + '">').join('') + '</datalist></div>' +
     cityField('po-city', meta, pt && pt.city) +
-    '<div class="field"><label>Адрес</label><input id="po-addr" value="' +
-    esc(pt ? pt.address || '' : '') + '"></div>' +
     ownerSelect('po-owner', meta, pt && pt.owner_user_id) +
     '<div class="field"><label>Комментарий</label><input id="po-comment" value="' +
     esc(pt ? pt.comment || '' : '') + '"></div>' +
-    '<button class="btn" id="po-save">Сохранить</button>' +
-    (pt ? '<div class="card" id="bk-box"></div>' : '') +
+    '<button class="btn" id="po-save" style="margin-bottom:0">Сохранить</button></div>' +
     (pt && (ME.role === 'admin' || pt.created_by === ME.id)
       ? '<button class="btn danger" id="po-del">Удалить</button>' : '');
-  const el = screen(pt ? 'Точка' : 'Новая точка', html, true);
-  if (pt) bookingBlock(el, 'point', pt.id, meta);
+  const el = screen(pt ? pt.name : 'Новая точка', html, true);
+  if (pt) {
+    bookingBlock(el, 'point', pt.id, meta);
+    if (scrollToBooking) el.querySelector('#bk-box').scrollIntoView({ block: 'start' });
+  }
   el.querySelector('#po-save').onclick = async () => {
     try {
       await api('/api/points', 'POST', {
@@ -1118,6 +1143,8 @@ async function S_pointEdit(pt, meta) {
         ptype: el.querySelector('#po-type').value,
         city: el.querySelector('#po-city').value,
         address: el.querySelector('#po-addr').value,
+        phone: el.querySelector('#po-phone').value,
+        email: el.querySelector('#po-email').value,
         owner_user_id: +el.querySelector('#po-owner').value || null,
         comment: el.querySelector('#po-comment').value,
       });

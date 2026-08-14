@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS points(
   ptype TEXT NOT NULL DEFAULT '',      -- рынок / ТЦ / сеть / магазин / ...
   city TEXT NOT NULL DEFAULT '',
   address TEXT,
-  owner_user_id INTEGER,               -- кто туда ездит
+  phone TEXT,
+  email TEXT,
+  owner_user_id INTEGER,               -- кто туда ездит (владелец точки)
   comment TEXT,
   created_by INTEGER NOT NULL,
   created_at TEXT NOT NULL
@@ -133,5 +135,15 @@ def get():
             _conn.execute("PRAGMA journal_mode=WAL")
             _conn.execute("PRAGMA foreign_keys=ON")
             _conn.executescript(SCHEMA)
+            _migrate(_conn)
             _conn.commit()
     return _conn
+
+
+def _migrate(conn):
+    """Лёгкие миграции для баз, созданных прежними версиями схемы."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(points)")}
+    if "phone" not in cols:
+        conn.execute("ALTER TABLE points ADD COLUMN phone TEXT")
+    if "email" not in cols:
+        conn.execute("ALTER TABLE points ADD COLUMN email TEXT")

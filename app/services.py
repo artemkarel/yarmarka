@@ -762,24 +762,26 @@ def points_list(conn, ptype=None, city=None, today=None):
     return _attach_bookings(conn, "point", rows, today or "2000-01-01")
 
 
-def point_save(conn, user, point_id, name, ptype, city, address, owner_user_id, comment):
+def point_save(conn, user, point_id, name, ptype, city, address, owner_user_id, comment,
+               phone=None, email=None):
     name = (name or "").strip()
     if not name:
         raise ValueError("Укажите название точки")
     owner = _owner_ok(conn, owner_user_id)
     vals = (name, (ptype or "").strip(), (city or "").strip(),
-            (address or "").strip() or None, owner, (comment or "").strip() or None)
+            (address or "").strip() or None, (phone or "").strip() or None,
+            (email or "").strip() or None, owner, (comment or "").strip() or None)
     with _lock, conn:
         if point_id:
             if conn.execute("SELECT 1 FROM points WHERE id=?", (point_id,)).fetchone() is None:
                 raise ValueError("Точка не найдена")
             conn.execute(
-                "UPDATE points SET name=?, ptype=?, city=?, address=?, owner_user_id=?, "
-                "comment=? WHERE id=?", vals + (point_id,))
+                "UPDATE points SET name=?, ptype=?, city=?, address=?, phone=?, email=?, "
+                "owner_user_id=?, comment=? WHERE id=?", vals + (point_id,))
         else:
             cur = conn.execute(
-                "INSERT INTO points(name, ptype, city, address, owner_user_id, comment, "
-                "created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO points(name, ptype, city, address, phone, email, owner_user_id, "
+                "comment, created_by, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 vals + (user["id"], now_utc()))
             point_id = cur.lastrowid
     r = conn.execute(_PLACE_SELECT.format(table="points") + " WHERE t.id=?", (point_id,)).fetchone()
