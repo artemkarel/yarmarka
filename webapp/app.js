@@ -43,8 +43,13 @@ function toast(msg, ok) {
 
 function confirmDlg(msg) {
   return new Promise(res => {
-    if (tg && tg.showConfirm) tg.showConfirm(msg, ok => res(ok));
-    else res(window.confirm(msg));
+    if (tg && tg.showConfirm && tg.isVersionAtLeast && tg.isVersionAtLeast('6.2')) {
+      try {
+        tg.showConfirm(msg, ok => res(ok));
+        return;
+      } catch (e) { /* клиент не поддерживает — обычный confirm */ }
+    }
+    res(window.confirm(msg));
   });
 }
 
@@ -132,36 +137,19 @@ function screen(title, html, sub) {
   return el;
 }
 
-// свайп от левого края — назад: экран (вместе с шапкой) едет за пальцем
+// свайп слева направо — назад: экран (вместе с шапкой) едет за пальцем
 (function () {
   const sc = () => document.getElementById('screen');
   let t0 = null;
-  document.addEventListener('touchstart', e => {
-    t0 = null;
-    if (stack.length < 2 || document.querySelector('.picker')) return;
-    const t = e.touches[0];
-    if (t.clientX <= 44) t0 = { x: t.clientX, y: t.clientY, drag: false, dead: false };
-  }, { passive: true });
-  document.addEventListener('touchmove', e => {
-    if (!t0 || t0.dead) return;
-    const t = e.touches[0];
-    const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
-    if (!t0.drag) {
-      if (Math.abs(dy) > 14 && Math.abs(dy) > Math.abs(dx)) { t0.dead = true; return; }
-      if (dx > 8) t0.drag = true;
-      else return;
-    }
+
+  function finish(dxRaw) {
     const el = sc();
-    el.style.transition = 'none';
-    el.style.transform = 'translateX(' + Math.max(0, dx) + 'px)';
-    t0.dx = dx;
-  }, { passive: true });
-  document.addEventListener('touchend', () => {
-    if (!t0 || !t0.drag) { t0 = null; return; }
-    const el = sc();
-    const dx = t0.dx || 0;
+    const dx = dxRaw || 0;
+    const dt = Date.now() - (t0.t || Date.now());
+    const speed = dt > 0 ? dx / dt : 0; // px/ms
     t0 = null;
-    if (dx > 90) {
+    const ok = dx > 70 || (dx > 30 && speed > 0.45);
+    if (ok) {
       el.style.transition = 'transform .16s ease';
       el.style.transform = 'translateX(100%)';
       setTimeout(() => {
@@ -171,12 +159,52 @@ function screen(title, html, sub) {
         ANIM = 'backin';
         render();
         if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
-      }, 160);
+      }, 150);
     } else {
       el.style.transition = 'transform .18s ease';
       el.style.transform = 'translateX(0)';
       setTimeout(() => { el.style.transition = ''; el.style.transform = ''; }, 200);
     }
+  }
+
+  document.addEventListener('touchstart', e => {
+    t0 = null;
+    if (stack.length < 2) return;
+    // не мешаем горизонтальным лентам (календарь, чипсы)
+    if (e.target.closest('.dstrip, .chips, input, select, textarea')) return;
+    const t = e.touches[0];
+    if (t.clientX <= 64) {
+      t0 = { x: t.clientX, y: t.clientY, drag: false, dead: false, dx: 0, t: Date.now() };
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!t0 || t0.dead) return;
+    const t = e.touches[0];
+    const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
+    if (!t0.drag) {
+      if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { t0.dead = true; return; }
+      if (dx > 6) t0.drag = true;
+      else return;
+    }
+    if (e.cancelable) e.preventDefault(); // жест наш — не отдаём его прокрутке
+    const el = sc();
+    el.style.transition = 'none';
+    el.style.transform = 'translateX(' + Math.max(0, dx) + 'px)';
+    t0.dx = dx;
+  }, { passive: false });
+
+  document.addEventListener('touchend', () => {
+    if (!t0) return;
+    if (!t0.drag) { t0 = null; return; }
+    finish(t0.dx);
+  }, { passive: true });
+
+  document.addEventListener('touchcancel', () => {
+    // систему перехватило — всё равно решаем по пройденному пути
+    if (!t0) return;
+    if (!t0.drag) { t0 = null; return; }
+    finish(t0.dx);
   }, { passive: true });
 })();
 
@@ -321,46 +349,43 @@ function docLinesHtml(doc) {
   }).join('');
 }
 
-// выбор товара с поиском
-function openPicker(products, cb, subFn) {
-  const ov = document.createElement('div');
-  ov.className = 'picker';
-  ov.innerHTML =
-    '<div class="subhead"><button class="backbtn" id="pk-close">‹</button>' +
-    '<div class="subtitle">Выбор товара</div></div>' +
-    '<div class="field"><input id="pk-q" placeholder="Поиск…" autocomplete="off"></div>' +
-    '<div id="pk-list"></div>';
-  document.body.appendChild(ov);
-  const list = ov.querySelector('#pk-list');
-  const draw = q => {
-    q = (q || '').toLowerCase().trim();
+// живой поиск товара: печатаешь название — снизу предлагаются позиции
+function attachProductSearch(el, products, opts) {
+  const inp = el.querySelector('#' + opts.input);
+  const box = el.querySelector('#' + opts.box);
+  const draw = () => {
+    const q = inp.value.toLowerCase().trim();
+    if (!q) { box.innerHTML = ''; box.hidden = true; return; }
     const items = products.filter(p => !p.archived &&
-      (!q || p.name.toLowerCase().includes(q) || (p.group_name || '').toLowerCase().includes(q)));
-    let html = '', lastGroup = null;
-    items.slice(0, 400).forEach(p => {
-      if (p.group_name !== lastGroup) {
-        lastGroup = p.group_name;
-        html += '<div class="hint small" style="margin:10px 4px 4px;font-weight:700">' +
-          esc(p.group_name || 'Без группы') + '</div>';
-      }
-      html += '<div class="card" style="padding:10px 12px;margin-bottom:6px" data-pid="' + p.id +
-        '"><div class="name">' + esc(p.name) + '</div><div class="sub hint small">' +
-        (subFn ? subFn(p) : fmtM(p.retail_price) + '/' + p.unit) + '</div></div>';
-    });
-    list.innerHTML = html || '<div class="hint" style="padding:20px;text-align:center">Не найдено</div>';
+      (p.name.toLowerCase().includes(q) || (p.group_name || '').toLowerCase().includes(q)))
+      .slice(0, 25);
+    box.hidden = false;
+    box.innerHTML = items.length ? items.map(p => {
+      const dis = opts.disabled && opts.disabled(p);
+      return '<div class="row' + (dis ? ' psdis' : '') + '" data-ps="' + p.id + '">' +
+        '<div class="l"><div class="name small">' + esc(p.name) + '</div>' +
+        '<div class="sub">' + opts.sub(p) + (dis ? ' • <span class="red">нет на складе</span>' : '') +
+        '</div></div>' + (dis ? '' : '<div class="r val" style="font-size:20px">+</div>') +
+        '</div>';
+    }).join('')
+      : '<div class="hint small" style="padding:10px 0">Ничего не найдено</div>';
   };
-  draw('');
-  ov.querySelector('#pk-q').addEventListener('input', e => draw(e.target.value));
-  ov.querySelector('#pk-q').focus();
-  const close = () => ov.remove();
-  ov.querySelector('#pk-close').onclick = close;
-  list.addEventListener('click', e => {
-    const c = e.target.closest('[data-pid]');
-    if (!c) return;
-    const p = products.find(x => x.id === +c.dataset.pid);
-    close();
-    cb(p);
+  inp.addEventListener('input', draw);
+  box.addEventListener('click', e => {
+    const c = e.target.closest('[data-ps]');
+    if (!c || c.classList.contains('psdis')) return;
+    const p = products.find(x => x.id === +c.dataset.ps);
+    inp.value = '';
+    box.innerHTML = '';
+    box.hidden = true;
+    opts.pick(p);
   });
+}
+
+function productSearchHtml(input, box, placeholder) {
+  return '<div class="field"><input id="' + input + '" placeholder="' +
+    (placeholder || '🔍 Начни вводить название товара…') + '" autocomplete="off"></div>' +
+    '<div class="card" id="' + box + '" hidden style="padding:4px 14px"></div>';
 }
 
 function periodChips(state, onChange) {
@@ -602,8 +627,8 @@ async function S_prihod() {
     '<option value="">— не указан —</option>' +
     sup.map(s => '<option value="' + s.id + '">' + esc(s.name) + '</option>').join('') +
     '</select></div></div>' +
+    productSearchHtml('pr-search', 'pr-sug') +
     '<div id="pr-lines"></div>' +
-    '<button class="btn secondary" id="pr-add">+ Добавить позицию</button>' +
     '<div class="card" id="pr-total" hidden></div>' +
     '<button class="btn" id="pr-save">Провести поступление</button>';
   const el = screen('Поступление товара', html, true);
@@ -642,9 +667,15 @@ async function S_prihod() {
     const rm = e.target.closest('.rm');
     if (rm) { lines.splice(+rm.dataset.i, 1); draw(); }
   });
-  el.querySelector('#pr-add').onclick = () =>
-    openPicker(products, p => { lines.push({ product: p, qty: '' }); draw(); },
-      p => 'остаток ' + fmtQ(p.stock_qty, p.unit) + ' • закуп ' + fmtM(p.purchase_price));
+  attachProductSearch(el, products, {
+    input: 'pr-search', box: 'pr-sug',
+    sub: p => 'остаток ' + fmtQ(p.stock_qty, p.unit) + ' • закуп ' + fmtM(p.purchase_price),
+    pick: p => {
+      if (lines.some(l => l.product.id === p.id)) return toast('Уже в списке');
+      lines.push({ product: p, qty: '' });
+      draw();
+    },
+  });
   el.querySelector('#pr-save').onclick = async () => {
     const out = lines.map(l => ({ product_id: l.product.id, qty: pnum(l.qty) }))
       .filter(l => l.qty > 0);
@@ -762,8 +793,8 @@ async function S_vydacha(sid) {
   const lines = [];
   const html =
     '<div class="field"><label>Дата</label><input type="date" id="v-date" value="' + today() + '"></div>' +
+    productSearchHtml('v-search', 'v-sug') +
     '<div id="v-lines"></div>' +
-    '<button class="btn secondary" id="v-add">+ Добавить позицию</button>' +
     '<div class="card" id="v-total" hidden></div>' +
     '<button class="btn" id="v-save">Выдать товар</button>';
   const el = screen('Выдача: ' + info.seller.name, html, true);
@@ -813,12 +844,18 @@ async function S_vydacha(sid) {
     const rm = e.target.closest('.rm');
     if (rm) { lines.splice(+rm.dataset.i, 1); draw(); }
   });
-  el.querySelector('#v-add').onclick = () =>
-    openPicker(products.filter(p => p.stock_qty > 0.0005 || shelfMap[p.id] > 0.0005),
-      p => { lines.push({ product: p, qty_wh: '', qty_shelf: '' }); draw(); },
-      p => 'склад ' + fmtQ(p.stock_qty, p.unit) +
-        (shelfMap[p.id] ? ' • полка ' + fmtQ(shelfMap[p.id], p.unit) : '') +
-        ' • ' + fmtM(p.retail_price) + '/' + p.unit);
+  attachProductSearch(el, products, {
+    input: 'v-search', box: 'v-sug',
+    sub: p => 'склад ' + fmtQ(p.stock_qty, p.unit) +
+      (shelfMap[p.id] ? ' • полка ' + fmtQ(shelfMap[p.id], p.unit) : '') +
+      ' • ' + fmtM(p.retail_price) + '/' + p.unit,
+    disabled: p => !(p.stock_qty > 0.0005 || shelfMap[p.id] > 0.0005),
+    pick: p => {
+      if (lines.some(l => l.product.id === p.id)) return toast('Уже в списке');
+      lines.push({ product: p, qty_wh: '', qty_shelf: '' });
+      draw();
+    },
+  });
   el.querySelector('#v-save').onclick = async () => {
     const out = lines.map(l => ({
       product_id: l.product.id, qty_wh: pnum(l.qty_wh), qty_shelf: pnum(l.qty_shelf),
@@ -1144,12 +1181,16 @@ function cityMatch(cityValue, query) {
 function evCardHtml(ev) {
   const dates = dstr(ev.date_from) +
     (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
+  // адрес — первый кусок комментария (площадка), без контактов
+  const addr = ((ev.comment || '').split(' • ')[0] || '').slice(0, 70);
+  const place = [ev.city, addr].filter(Boolean).join(', ');
   return '<div class="card place" data-eid="' + ev.id + '" style="cursor:pointer">' +
     '<div class="pl-main">' +
     '<div class="dochead"><div><b>' + esc(ev.name) + '</b></div>' +
     '<div class="dt">' + dates + '</div></div>' +
-    '<div class="sub small" style="margin-top:4px">' + ownerLine(ev) + '</div>' +
-    bookingsLine(ev) + '</div>' +
+    (place ? '<div class="sub hint small">' + esc(place) + '</div>' : '') +
+    '<div class="plfoot"><div class="sub small" style="margin-top:4px">' + ownerLine(ev) +
+    '</div>' + bookingsLine(ev) + '</div></div>' +
     '<button class="bookbtn" data-ebook="' + ev.id + '">Забронировать</button></div>';
 }
 
@@ -1172,7 +1213,7 @@ function ptCardHtml(pt) {
     '<div><b>' + esc(pt.name) + '</b></div>' +
     '<div class="sub hint small">' +
     ([esc(pt.address || ''), esc(pt.city)].filter(Boolean).join(', ') || 'адрес не указан') +
-    '</div>' + bookingsLine(pt) + '</div>' +
+    '</div><div class="plfoot">' + bookingsLine(pt) + '</div></div>' +
     '<button class="bookbtn" data-book="' + pt.id + '">Забронировать</button></div>';
 }
 
@@ -1308,15 +1349,16 @@ async function S_places() {
     if (pt) { PL_STATE.ptype = pt.dataset.ptype; render(); return; }
     const eb = e.target.closest('[data-ebook]');
     if (eb) {
-      // бронь мероприятия в один тап — сразу на его даты
+      // бронь в один тап — на выбранную в календаре дату (в пределах дат события)
       const ev = allEvents.find(x => x.id === +eb.dataset.ebook);
-      const dates = dstr(ev.date_from) +
-        (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
-      if (!(await confirmDlg('Забронировать «' + ev.name + '» (' + dates + ') на себя?'))) return;
+      const evTo = ev.date_to || ev.date_from;
+      const from = per.from > ev.date_from ? per.from : ev.date_from;
+      const to = per.to < evTo ? per.to : evTo;
+      const dates = dstr(from) + (to !== from ? ' – ' + dstr(to) : '');
+      if (!(await confirmDlg('Забронировать «' + ev.name + '» на ' + dates + '?'))) return;
       try {
         await api('/api/bookings', 'POST', {
-          kind: 'event', ref_id: ev.id, user_id: ME.id,
-          date_from: ev.date_from, date_to: ev.date_to || ev.date_from,
+          kind: 'event', ref_id: ev.id, user_id: ME.id, date_from: from, date_to: to,
         });
         toast('Забронировано ✓', true);
         render();
