@@ -161,6 +161,20 @@ def api_products(request: Request, all: int = 0):
     return {"products": services.products_list(db.get(), include_archived=bool(all))}
 
 
+@app.get("/api/groups")
+def api_groups(request: Request):
+    u = current_user(request)
+    need_staff(u)
+    return {"groups": services.groups_list(db.get())}
+
+
+@app.put("/api/groups/order")
+def api_groups_order(request: Request, payload: dict = Body(...)):
+    u = current_user(request)
+    need_staff(u)
+    return {"groups": services.groups_set_order(db.get(), payload.get("names") or [])}
+
+
 @app.post("/api/products")
 def api_product_create(request: Request, payload: dict = Body(...)):
     u = current_user(request)
@@ -585,6 +599,16 @@ def api_places_meta(request: Request):
     need_not_keeper(u)
     conn = db.get()
     return {"cities": services.places_cities(conn), "people": services.people_list(conn)}
+
+
+@app.get("/api/geo")
+def api_geo(request: Request):
+    """Координаты городов для карты событий (из локального кеша геокодера)."""
+    u = current_user(request)
+    need_not_keeper(u)
+    conn = db.get()
+    return {"geo": {r["city"]: [r["lat"], r["lon"]] for r in conn.execute(
+        "SELECT city, lat, lon FROM geo_cache WHERE lat IS NOT NULL")}}
 
 
 @app.get("/api/events")

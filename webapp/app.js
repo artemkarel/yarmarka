@@ -31,6 +31,13 @@ function isoDate(d) {
 function today() { return isoDate(new Date()); }
 function daysAgo(n) { return isoDate(new Date(Date.now() - n * 864e5)); }
 function dstr(d) { return d ? d.slice(8, 10) + '.' + d.slice(5, 7) + '.' + d.slice(2, 4) : ''; }
+// время создания документа (из ts) в местном времени — важно для порядка в цепочках
+function tstr(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d)) return '';
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
 
 function toast(msg, ok) {
   const t = document.getElementById('toast');
@@ -217,7 +224,7 @@ function screen(title, html, sub) {
 
   document.addEventListener('touchstart', e => {
     sw = (e.touches.length === 1 && stack.length > 1 && !backBusy &&
-          !e.target.closest('.dstrip, .chips, .sheet, .sheetbg'))
+          !e.target.closest('.dstrip, .chips, .sheet, .sheetbg, #map-box'))
       ? { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(),
           engaged: false, dead: false, w: 0 }
       : null;
@@ -495,7 +502,9 @@ function docCard(d, showSeller, canManage) {
     '" ontoggle="onDocToggle(event,' + d.id + ')">' +
     '<summary><div class="dochead"><div><b>' + meta[0] + ' ' + meta[1] + '</b>' +
     statusBadge(d) + '</div>' +
-    '<div class="dt">' + dstr(d.date) + controls + '</div></div>' +
+    '<div class="dt">' + dstr(d.date) +
+    (tstr(d.ts) ? ' <span style="opacity:.65">' + tstr(d.ts) + '</span>' : '') +
+    controls + '</div></div>' +
     '<div class="sub hint small">' + who + sum +
     (d.comment ? ' • ' + esc(d.comment) : '') + '</div></summary>' +
     '<div class="doclines hint small">Загрузка…</div></details>';
@@ -552,6 +561,7 @@ function docLinesHtml(doc) {
         const m = DOC_META[c.type] || ['📄', c.type];
         return '<button class="chip" style="margin:2px 4px 2px 0" data-chainopen="' + c.id +
           '">' + (c.rel === 'parent' ? '⬆️ ' : '⬇️ ') + m[1] + ' от ' + dstr(c.date) +
+          (tstr(c.ts) ? ' ' + tstr(c.ts) : '') +
           (c.status === 'void' ? ' (отменён)' : '') + '</button>';
       }).join('')
     : '') +
@@ -639,6 +649,81 @@ function attachProductSearch(el, products, opts) {
     box.hidden = true;
     opts.pick(p);
   });
+}
+
+// строки «сначала добавь строку — потом ищи позицию в ней»
+function lineSearchHtml(i, placeholder) {
+  return '<div class="line"><div class="linehead">' +
+    '<input class="lsearch" data-i="' + i + '" placeholder="' +
+    (placeholder || '🔍 Начни вводить название…') + '" autocomplete="off" style="flex:1">' +
+    '<button class="rm" data-i="' + i + '">✕</button></div>' +
+    '<div class="lsug" data-sug="' + i + '"></div></div>';
+}
+
+function attachLineSearch(linesEl, lines, products, opts) {
+  linesEl.addEventListener('input', e => {
+    if (!e.target.classList.contains('lsearch')) return;
+    const i = +e.target.dataset.i;
+    const box = linesEl.querySelector('[data-sug="' + i + '"]');
+    const q = e.target.value.trim();
+    if (!q) { box.innerHTML = ''; return; }
+    const used = new Set(lines.filter(l => l.product).map(l => l.product.id));
+    const items = products.filter(p => !p.archived && !used.has(p.id) &&
+      (fuzzyMatch(q, p.name) || fuzzyMatch(q, p.group_name))).slice(0, 15);
+    box.innerHTML = items.length ? items.map(p => {
+      const dis = opts.disabled && opts.disabled(p);
+      return '<div class="row' + (dis ? ' psdis' : '') + '" data-lpick="' + p.id +
+        '" data-li="' + i + '"><div class="l"><div class="name small">' + esc(p.name) +
+        '</div><div class="sub">' + opts.sub(p) +
+        (dis ? ' • <span class="red">нет на складе</span>' : '') + '</div></div>' +
+        (dis ? '' : '<div class="r val" style="font-size:20px">+</div>') + '</div>';
+    }).join('') : '<div class="hint small" style="padding:8px 0">Ничего не найдено</div>';
+  });
+  linesEl.addEventListener('click', e => {
+    const c = e.target.closest('[data-lpick]');
+    if (!c || c.classList.contains('psdis')) return;
+    const p = products.find(x => x.id === +c.dataset.lpick);
+    opts.pick(+c.dataset.li, p);
+  });
+}
+
+// выпадающий список поставщиков с добавлением нового прямо из меню
+function supplierDropdown(el, sup, onPick) {
+  const inp = el.querySelector('#pr-sup');
+  const dd = el.querySelector('#pr-sup-dd');
+  const draw = () => {
+    const q = inp.value.trim();
+    dd.innerHTML = sup.filter(s => fuzzyMatch(q, s.name)).map(s =>
+      '<div class="ddrow" data-sid="' + s.id + '">' + esc(s.name) + '</div>').join('') +
+      '<div class="ddrow ddadd">+ Добавить поставщика' + (q ? ' «' + esc(q) + '»' : '') +
+      '</div>';
+    dd.hidden = false;
+  };
+  inp.addEventListener('focus', draw);
+  inp.addEventListener('input', () => { onPick(null); draw(); });
+  dd.addEventListener('pointerdown', async e => {
+    const r = e.target.closest('.ddrow');
+    if (!r) return;
+    e.preventDefault(); // раньше blur — иначе меню закроется до выбора
+    if (r.dataset.sid) {
+      const s = sup.find(x => x.id === +r.dataset.sid);
+      inp.value = s.name;
+      dd.hidden = true;
+      onPick(s.id);
+      return;
+    }
+    const name = inp.value.trim();
+    if (!name) return toast('Введи название поставщика');
+    try {
+      const created = (await api('/api/suppliers', 'POST', { name })).supplier;
+      sup.push(created);
+      inp.value = created.name;
+      dd.hidden = true;
+      onPick(created.id);
+      toast('Поставщик добавлен ✓', true);
+    } catch (err) { toast(err.message); }
+  });
+  inp.addEventListener('blur', () => setTimeout(() => { dd.hidden = true; }, 250));
 }
 
 function productSearchHtml(input, box, placeholder) {
@@ -898,28 +983,29 @@ async function S_chooseSeller(mode) {
 async function S_prihod() {
   const products = await getProducts(true);
   const sup = (await api('/api/suppliers')).suppliers;
-  const lines = [];
+  const lines = [{ product: null, qty: '', price: '' }];
+  let supplierId = null;
   const html =
     '<div class="grid2" style="margin-bottom:10px">' +
     '<div class="field" style="margin:0"><label>Дата</label>' +
     '<input type="date" id="pr-date" value="' + today() + '"></div>' +
-    '<div class="field" style="margin:0"><label>Поставщик</label>' +
-    '<input id="pr-sup" list="pr-sup-dl" placeholder="Поиск или выбор…" autocomplete="off">' +
-    '<datalist id="pr-sup-dl">' +
-    sup.map(s => '<option value="' + esc(s.name) + '">').join('') + '</datalist></div></div>' +
-    productSearchHtml('pr-search', 'pr-sug') +
+    '<div class="field ddwrap" style="margin:0"><label>Поставщик</label>' +
+    '<input id="pr-sup" placeholder="Выбрать…" autocomplete="off">' +
+    '<div class="dd" id="pr-sup-dd" hidden></div></div></div>' +
     '<div id="pr-lines"></div>' +
-    '<button class="chip" id="pr-more" hidden style="margin-bottom:10px">+ Добавить строку</button>' +
+    '<button class="chip" id="pr-more" style="margin-bottom:10px">+ Добавить позицию</button>' +
     '<div class="card" id="pr-total" hidden></div>' +
     '<button class="btn" id="pr-save">Провести поступление</button>' +
     '<button class="btn secondary" id="pr-draft">💾 Сохранить черновик</button>';
   const el = screen('Поступление товара', html, true);
   floatSave(el, '#pr-save');
   const linesEl = el.querySelector('#pr-lines');
+  supplierDropdown(el, sup, id => { supplierId = id; });
 
   const totals = () => {
     let pv = 0, any = false;
     lines.forEach(l => {
+      if (!l.product) return;
       const q = pnum(l.qty);
       if (q > 0) { any = true; pv += q * pnum(l.price); }
     });
@@ -927,24 +1013,31 @@ async function S_prihod() {
     tEl.hidden = !any;
     tEl.innerHTML = '<div class="row"><div class="l hint">Итого по себестоимости</div>' +
       '<div class="r val">' + fmtM(pv) + '</div></div>';
-    el.querySelector('#pr-more').hidden = !lines.length;
   };
-  const draw = () => {
-    linesEl.innerHTML = lines.map((l, i) =>
-      '<div class="line"><div class="linehead"><div style="flex:1"><div class="name">' +
-      (i + 1) + '. ' + esc(l.product.name) + '</div>' +
-      '<div class="sub hint small">себестоимость ' + fmtM(l.product.purchase_price) +
-      '</div></div>' +
-      '<button class="rm" data-i="' + i + '">✕</button></div>' +
-      '<div class="grid2">' +
-      '<div class="field" style="margin:0"><label>Себестоимость, ₽/' + l.product.unit +
-      '</label><input inputmode="decimal" class="pin" data-i="' + i + '" value="' +
-      esc(l.price) + '"></div>' +
-      '<div class="field" style="margin:0"><label>Количество, ' + l.product.unit + '</label>' +
-      '<input inputmode="decimal" class="qin" data-i="' + i + '" value="' + esc(l.qty) + '"></div>' +
-      '</div></div>').join('');
+  const draw = focusIdx => {
+    linesEl.innerHTML = lines.map((l, i) => {
+      if (!l.product) return lineSearchHtml(i);
+      return '<div class="line"><div class="linehead"><div style="flex:1"><div class="name">' +
+        (i + 1) + '. ' + esc(l.product.name) + '</div>' +
+        '<div class="sub hint small">себестоимость ' + fmtM(l.product.purchase_price) +
+        '</div></div>' +
+        '<button class="rm" data-i="' + i + '">✕</button></div>' +
+        '<div class="grid2">' +
+        '<div class="field" style="margin:0"><label>Себестоимость, ₽/' + l.product.unit +
+        '</label><input inputmode="decimal" class="pin" data-i="' + i + '" value="' +
+        esc(l.price) + '"></div>' +
+        '<div class="field" style="margin:0"><label>Количество, ' + l.product.unit + '</label>' +
+        '<input inputmode="decimal" class="qin" data-i="' + i + '" value="' + esc(l.qty) +
+        '"></div>' +
+        '</div></div>';
+    }).join('');
     totals();
+    if (focusIdx != null) {
+      const s = linesEl.querySelector('.lsearch[data-i="' + focusIdx + '"]');
+      if (s) s.focus();
+    }
   };
+  draw();
   linesEl.addEventListener('input', e => {
     const i = +e.target.dataset.i;
     if (e.target.classList.contains('qin')) { lines[i].qty = e.target.value; totals(); }
@@ -954,30 +1047,28 @@ async function S_prihod() {
     const rm = e.target.closest('.rm');
     if (rm) { lines.splice(+rm.dataset.i, 1); draw(); }
   });
-  attachProductSearch(el, products, {
-    input: 'pr-search', box: 'pr-sug',
+  attachLineSearch(linesEl, lines, products, {
     sub: p => 'остаток ' + fmtQ(p.stock_qty, p.unit) + ' • себестоимость ' +
       fmtM(p.purchase_price),
-    pick: p => {
-      if (lines.some(l => l.product.id === p.id)) return toast('Уже в списке');
-      lines.push({ product: p, qty: '', price: String(p.purchase_price || '') });
+    pick: (i, p) => {
+      lines[i] = { product: p, qty: '', price: String(p.purchase_price || '') };
       draw();
+      const q = linesEl.querySelector('.qin[data-i="' + i + '"]');
+      if (q) q.focus();
     },
   });
   el.querySelector('#pr-more').onclick = () => {
-    const s = el.querySelector('#pr-search');
-    s.scrollIntoView({ block: 'center' });
-    s.focus();
+    lines.push({ product: null, qty: '', price: '' });
+    draw(lines.length - 1);
   };
   const saveProc = async draft => {
-    const out = lines.map(l => ({
+    const out = lines.filter(l => l.product).map(l => ({
       product_id: l.product.id, qty: pnum(l.qty), purchase_price: pnum(l.price),
     })).filter(l => l.qty > 0);
     if (!out.length) return toast('Добавь позиции и количество');
-    // поставщик: ищем по имени, при новом имени предлагаем создать
-    let supplierId;
+    // поставщик: выбран из меню или введён текстом — тогда ищем/создаём по имени
     const supName = el.querySelector('#pr-sup').value.trim();
-    if (supName) {
+    if (!supplierId && supName) {
       const found = sup.find(s => s.name.toLowerCase() === supName.toLowerCase());
       if (found) supplierId = found.id;
       else {
@@ -1219,11 +1310,11 @@ async function S_vydacha(sid) {
   const info = await api('/api/sellers/' + sid);
   const shelfMap = {};
   info.stock.shelf.forEach(s => { shelfMap[s.product_id] = s.qty; });
-  const lines = [];
+  const lines = [{ product: null, qty_wh: '', qty_shelf: '' }];
   const html =
     '<div class="field"><label>Дата</label><input type="date" id="v-date" value="' + today() + '"></div>' +
-    productSearchHtml('v-search', 'v-sug') +
     '<div id="v-lines"></div>' +
+    '<button class="chip" id="v-more" style="margin-bottom:10px">+ Добавить позицию</button>' +
     '<div class="card" id="v-total" hidden></div>' +
     '<button class="btn" id="v-save">Выдать товар</button>' +
     '<button class="btn secondary" id="v-draft">💾 Сохранить черновик</button>';
@@ -1234,6 +1325,7 @@ async function S_vydacha(sid) {
   const totals = () => {
     let sum = 0, any = false;
     lines.forEach(l => {
+      if (!l.product) return;
       const q = pnum(l.qty_wh) + pnum(l.qty_shelf);
       if (q > 0) { any = true; sum += q * l.product.retail_price; }
     });
@@ -1245,8 +1337,9 @@ async function S_vydacha(sid) {
       '<div class="row"><div class="l hint">Долг (+' + SETTINGS.share_pct + '%)</div>' +
       '<div class="r val red">+ ' + fmtM(sum * SETTINGS.share_pct / 100) + '</div></div>';
   };
-  const draw = () => {
+  const draw = focusIdx => {
     linesEl.innerHTML = lines.map((l, i) => {
+      if (!l.product) return lineSearchHtml(i);
       const shelfQ = shelfMap[l.product.id] || 0;
       return '<div class="line"><div class="linehead"><div style="flex:1">' +
         '<div class="name">' + esc(l.product.name) + '</div>' +
@@ -1264,6 +1357,10 @@ async function S_vydacha(sid) {
         '</div></div>';
     }).join('');
     totals();
+    if (focusIdx != null) {
+      const s = linesEl.querySelector('.lsearch[data-i="' + focusIdx + '"]');
+      if (s) s.focus();
+    }
   };
   linesEl.addEventListener('input', e => {
     const i = +e.target.dataset.i;
@@ -1275,20 +1372,24 @@ async function S_vydacha(sid) {
     const rm = e.target.closest('.rm');
     if (rm) { lines.splice(+rm.dataset.i, 1); draw(); }
   });
-  attachProductSearch(el, products, {
-    input: 'v-search', box: 'v-sug',
+  attachLineSearch(linesEl, lines, products, {
     sub: p => 'склад ' + fmtQ(p.stock_qty, p.unit) +
       (shelfMap[p.id] ? ' • полка ' + fmtQ(shelfMap[p.id], p.unit) : '') +
       ' • ' + fmtM(p.retail_price) + '/' + p.unit,
     disabled: p => !(p.stock_qty > 0.0005 || shelfMap[p.id] > 0.0005),
-    pick: p => {
-      if (lines.some(l => l.product.id === p.id)) return toast('Уже в списке');
-      lines.push({ product: p, qty_wh: '', qty_shelf: '' });
+    pick: (i, p) => {
+      lines[i] = { product: p, qty_wh: '', qty_shelf: '' };
       draw();
+      const q = linesEl.querySelector('.q-wh[data-i="' + i + '"]');
+      if (q) q.focus();
     },
   });
+  el.querySelector('#v-more').onclick = () => {
+    lines.push({ product: null, qty_wh: '', qty_shelf: '' });
+    draw(lines.length - 1);
+  };
   const saveVyd = async draft => {
-    const out = lines.map(l => ({
+    const out = lines.filter(l => l.product).map(l => ({
       product_id: l.product.id, qty_wh: pnum(l.qty_wh), qty_shelf: pnum(l.qty_shelf),
     })).filter(l => l.qty_wh > 0 || l.qty_shelf > 0);
     if (!out.length) return toast('Добавь позиции и количество');
@@ -1311,6 +1412,7 @@ async function S_vydacha(sid) {
   };
   el.querySelector('#v-save').onclick = () => saveVyd(false);
   el.querySelector('#v-draft').onclick = () => saveVyd(true);
+  draw();
 }
 
 async function S_sdacha(sid) {
@@ -1870,6 +1972,7 @@ async function S_invReport(docId) {
           const m = DOC_META[c.type] || ['📄', c.type];
           return '<button class="chip" style="margin:2px 6px 2px 0" data-chainopen="' + c.id +
             '">' + m[0] + ' ' + m[1] + ' от ' + dstr(c.date) +
+            (tstr(c.ts) ? ' ' + tstr(c.ts) : '') +
             (c.status === 'void' ? ' (отменён)' : '') + '</button>';
         }).join('') + '</div>'
       : '');
@@ -2131,6 +2234,166 @@ function openMonthSheet(selKey, onPick) {
   draw();
 }
 
+// ===== карта событий (Leaflet + OSM, грузится только при открытии) =====
+let LEAFLET_P = null;
+let MAP_GEO = null;
+
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (!LEAFLET_P) {
+    LEAFLET_P = new Promise((res, rej) => {
+      const css = document.createElement('link');
+      css.rel = 'stylesheet';
+      css.href = 'vendor/leaflet.css';
+      document.head.appendChild(css);
+      const s = document.createElement('script');
+      s.src = 'vendor/leaflet.js';
+      s.onload = res;
+      s.onerror = rej;
+      document.body.appendChild(s);
+    });
+  }
+  return LEAFLET_P;
+}
+
+function yandexMapsUrl(x) {
+  const q = [x.city, x.address || ''].filter(Boolean).join(', ') || x.name;
+  return 'https://yandex.ru/maps/?text=' + encodeURIComponent(q);
+}
+
+async function S_map(allEvents, allPoints, meta) {
+  if (!MAP_GEO) MAP_GEO = (await api('/api/geo')).geo;
+  try {
+    await loadLeaflet();
+  } catch (e) {
+    screen('Карта событий', '<div class="card hint">Не удалось загрузить карту</div>', true);
+    return;
+  }
+  const sel = PL_STATE;
+  const t = today();
+  const typeOptions = [...new Set(
+    allEvents.map(x => x.etype || 'Другое').concat(allPoints.map(x => x.ptype || 'Другое'))
+  )].sort();
+  const textMatch = x => {
+    const q = (sel.q || '').trim();
+    return !q || fuzzyMatch(q, x.name) || fuzzyMatch(q, x.city) || fuzzyMatch(q, x.address);
+  };
+  const match = x =>
+    (!sel.typeSel.length || sel.typeSel.includes((x.etype || x.ptype) || 'Другое')) &&
+    whoMatch(x, sel.whoSel) && textMatch(x);
+  const html =
+    '<div class="searchrow"><span class="sico">🔍</span>' +
+    '<input id="mp-q" placeholder="Поиск на карте…" autocomplete="off" value="' +
+    esc(sel.q || '') + '">' +
+    '<button id="fl-open" title="Фильтры">' +
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
+    '<path d="M3.5 8h17M3.5 16h17"/>' +
+    '<circle cx="10" cy="8" r="3.1" fill="currentColor" stroke="none"/>' +
+    '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
+    '<span id="fl-n"></span></button></div>' +
+    '<div id="map-box"></div>' +
+    '<div class="hint small" style="margin-top:8px" id="mp-count"></div>';
+  const el = screen('Карта событий', html, true);
+  const map = L.map(el.querySelector('#map-box'),
+    { zoomControl: false, attributionControl: false });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
+  const layer = L.layerGroup().addTo(map);
+  const nActive = () => sel.typeSel.length + sel.whoSel.length;
+  const flLabel = () => {
+    el.querySelector('#fl-n').textContent = nActive() ? nActive() : '';
+  };
+  const openCitySheet = (city, arr) => {
+    const bg = document.createElement('div');
+    bg.className = 'sheetbg';
+    const sh = document.createElement('div');
+    sh.className = 'sheet';
+    sh.innerHTML =
+      '<div class="sheethandle"></div>' +
+      '<h3 style="margin-bottom:8px">' + esc(city) + '</h3>' +
+      arr.slice(0, 40).map((x, i) =>
+        '<div class="row"><div class="l" style="flex:1" ' +
+        'data-open="' + x.kind + ':' + x.id + '"><div class="name small">' + (i + 1) + '. ' +
+        esc(x.name) + '</div><div class="sub">' +
+        (x.kind === 'event'
+          ? dstr(x.date_from) + (x.date_to && x.date_to !== x.date_from
+              ? ' – ' + dstr(x.date_to) : '')
+          : 'постоянная точка') +
+        (x.owner_name ? ' • ездит: ' + esc(x.owner_name) : '') + '</div></div>' +
+        '<div class="r"><button class="chip" data-ya="' + esc(yandexMapsUrl(x)) +
+        '">🗺</button></div></div>').join('');
+    const close = () => {
+      document.body.classList.remove('sheet-open');
+      bg.remove(); sh.remove();
+    };
+    bg.onclick = close;
+    sh.addEventListener('click', e => {
+      const ya = e.target.closest('[data-ya]');
+      if (ya) { openExternal(ya.dataset.ya); return; }
+      const op = e.target.closest('[data-open]');
+      if (!op) return;
+      const parts = op.dataset.open.split(':');
+      close();
+      if (parts[0] === 'event') {
+        push(S_eventView, allEvents.find(x => x.id === +parts[1]), meta);
+      } else {
+        push(S_pointEdit, allPoints.find(x => x.id === +parts[1]), meta, false);
+      }
+    });
+    bg.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+    document.body.classList.add('sheet-open');
+    document.body.appendChild(bg);
+    document.body.appendChild(sh);
+  };
+  const redraw = () => {
+    layer.clearLayers();
+    // на карте — будущие события + постоянные точки, с теми же фильтрами
+    const items = allEvents
+      .filter(ev => (ev.date_to || ev.date_from) >= t)
+      .filter(match).map(x => ({ ...x, kind: 'event' }))
+      .concat(allPoints.filter(match).map(x => ({ ...x, kind: 'point' })));
+    const byCity = {};
+    let located = 0;
+    items.forEach(x => {
+      const g = MAP_GEO[x.city];
+      if (!g) return;
+      (byCity[x.city] = byCity[x.city] || []).push(x);
+      located++;
+    });
+    const bounds = [];
+    Object.keys(byCity).forEach(city => {
+      const g = MAP_GEO[city];
+      bounds.push(g);
+      const mk = L.marker(g, { icon: L.divIcon({
+        className: 'citypin', html: '<span>' + byCity[city].length + '</span>',
+        iconSize: [34, 34],
+      }) });
+      mk.on('click', () => openCitySheet(city, byCity[city]));
+      mk.addTo(layer);
+    });
+    if (bounds.length) map.fitBounds(bounds, { padding: [28, 28], maxZoom: 10 });
+    else map.setView([56.5, 55.0], 4);
+    el.querySelector('#mp-count').textContent = located
+      ? 'На карте: ' + located + ' (тапни по кружку города)'
+      : 'Ничего не найдено — измени фильтры';
+    flLabel();
+  };
+  el.querySelector('#fl-open').onclick = () => openFilterSheet({
+    types: typeOptions,
+    people: meta.people.filter(p => p.role !== 'admin' && p.role !== 'keeper'),
+    sel,
+    count: () => allEvents.filter(ev => (ev.date_to || ev.date_from) >= t).filter(match)
+      .concat(allPoints.filter(match)).length,
+    onClose: redraw,
+  });
+  const qInp = el.querySelector('#mp-q');
+  qInp.addEventListener('input', () => {
+    clearTimeout(qInp._t);
+    qInp._t = setTimeout(() => { sel.q = qInp.value; redraw(); }, 250);
+  });
+  setTimeout(() => { map.invalidateSize(); redraw(); }, 60);
+}
+
 function openFilterSheet(opts) {
   const bg = document.createElement('div');
   bg.className = 'sheetbg';
@@ -2247,6 +2510,11 @@ async function S_places() {
     '<div class="searchrow"><span class="sico">🔍</span>' +
     '<input id="pl-q" placeholder="Поиск точек и мероприятий…" autocomplete="off" value="' +
     esc(PL_STATE.q || '') + '">' +
+    '<button id="map-open" title="Карта">' +
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
+    ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2Z"/><path d="M9 4v14"/>' +
+    '<path d="M15 6v14"/></svg></button>' +
     '<button id="fl-open" title="Фильтры">' +
     '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
     ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
@@ -2285,6 +2553,7 @@ async function S_places() {
     count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
     onClose: applyAll,
   });
+  el.querySelector('#map-open').onclick = () => push(S_map, allEvents, allPoints, meta);
   el.addEventListener('click', async e => {
     const add = e.target.closest('[data-add]');
     if (add) {
@@ -2653,11 +2922,14 @@ async function S_products() {
   const html =
     '<button class="btn" id="p-add">+ Добавить товар</button>' +
     '<div class="field"><input id="p-q" placeholder="Поиск…"></div>' +
+    '<div class="addline" style="text-align:left;margin-top:0">' +
+    '<span id="p-order" style="margin-left:0">⇅ Порядок групп</span></div>' +
     '<div class="card" id="p-list">' + (listHtml || '<div class="hint">Пусто</div>') + '</div>' +
     (arch.length
       ? '<div class="card"><h3>Архив</h3>' + arch.map(rowP).join('') + '</div>' : '');
   const el = screen('Номенклатура', html, true);
   el.querySelector('#p-add').onclick = () => push(S_productEdit, null);
+  el.querySelector('#p-order').onclick = () => push(S_groupOrder);
   el.querySelector('#p-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('#p-list .row').forEach(r => {
@@ -2677,6 +2949,36 @@ async function S_products() {
     }
     const c = e.target.closest('[data-pid]');
     if (c) push(S_productEdit, products.find(p => p.id === +c.dataset.pid));
+  });
+}
+
+// порядок групп: стрелками вверх/вниз, применяется во всех списках товаров
+async function S_groupOrder() {
+  let groups = (await api('/api/groups')).groups.map(g => g.name);
+  const rowsHtml = () => groups.map((g, i) =>
+    '<div class="row"><div class="l name small">' + esc(g) + '</div>' +
+    '<div class="r" style="display:flex;gap:6px">' +
+    '<button class="chip" data-up="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+    '<button class="chip" data-dn="' + i + '"' + (i === groups.length - 1 ? ' disabled' : '') +
+    '>↓</button></div></div>').join('');
+  const html =
+    '<div class="card hint small">Стрелками задай порядок — он применится во всех списках ' +
+    'товаров: склад, номенклатура, цены, ведомости.</div>' +
+    '<div class="card" id="go-list">' + rowsHtml() + '</div>';
+  const el = screen('Порядок групп', html, true);
+  el.addEventListener('click', async e => {
+    const up = e.target.closest('[data-up]');
+    const dn = e.target.closest('[data-dn]');
+    if (!up && !dn) return;
+    const i = +(up ? up.dataset.up : dn.dataset.dn);
+    const j = up ? i - 1 : i + 1;
+    if (j < 0 || j >= groups.length) return;
+    [groups[i], groups[j]] = [groups[j], groups[i]];
+    el.querySelector('#go-list').innerHTML = rowsHtml();
+    try {
+      await api('/api/groups/order', 'PUT', { names: groups });
+      PRODUCTS_CACHE = null;
+    } catch (err) { toast(err.message); }
   });
 }
 

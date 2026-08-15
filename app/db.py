@@ -178,7 +178,30 @@ def _migrate(conn):
       unit_cost REAL NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_lotmoves_doc ON lot_moves(doc_id);
+    CREATE TABLE IF NOT EXISTS product_groups(
+      name TEXT PRIMARY KEY,
+      sort INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS geo_cache(
+      city TEXT PRIMARY KEY,
+      lat REAL,
+      lon REAL
+    );
     """)
+    # группы товаров: нормализуем регистр («ДРАЖЕ» → «Драже») и заводим порядок
+    if not conn.execute("SELECT 1 FROM product_groups LIMIT 1").fetchone():
+        raw = [r["g"] for r in conn.execute(
+            "SELECT DISTINCT group_name g FROM products WHERE group_name != '' "
+            "ORDER BY group_name")]
+        seen = []
+        for g in raw:
+            norm = g.strip()
+            norm = (norm[:1].upper() + norm[1:].lower()) if norm else norm
+            conn.execute("UPDATE products SET group_name=? WHERE group_name=?", (norm, g))
+            if norm not in seen:
+                conn.execute("INSERT OR IGNORE INTO product_groups(name, sort) VALUES(?,?)",
+                             (norm, len(seen)))
+                seen.append(norm)
     # FIFO-старт для баз, живших без партий: остатки склада превращаем в стартовые партии
     has_lots = conn.execute("SELECT 1 FROM lots LIMIT 1").fetchone()
     if not has_lots:

@@ -183,11 +183,44 @@ def _product(conn, pid):
     return dict(r)
 
 
+def _norm_group(g):
+    g = (g or "").strip()
+    return (g[:1].upper() + g[1:].lower()) if g else ""
+
+
+def _ensure_group(conn, g):
+    """Новая группа попадает в конец списка порядка."""
+    if not g:
+        return
+    if conn.execute("SELECT 1 FROM product_groups WHERE name=?", (g,)).fetchone() is None:
+        mx = conn.execute("SELECT COALESCE(MAX(sort), -1) m FROM product_groups").fetchone()["m"]
+        conn.execute("INSERT INTO product_groups(name, sort) VALUES(?,?)", (g, mx + 1))
+
+
+GROUP_ORDER_SQL = (" ORDER BY CASE WHEN p.group_name='' THEN 1 ELSE 0 END, "
+                   "COALESCE(g.sort, 9999), p.group_name, p.name")
+
+
+def groups_list(conn):
+    return [{"name": r["name"], "sort": r["sort"]} for r in conn.execute(
+        "SELECT name, sort FROM product_groups ORDER BY sort, name")]
+
+
+def groups_set_order(conn, names):
+    """Полный список имён в новом порядке."""
+    with _lock, conn:
+        for i, n in enumerate(names):
+            conn.execute("UPDATE product_groups SET sort=? WHERE name=?", (i, str(n)))
+    return groups_list(conn)
+
+
 def products_list(conn, include_archived=False):
-    q = "SELECT p.*, COALESCE(s.qty, 0) AS stock_qty FROM products p LEFT JOIN stock s ON s.product_id = p.id"
+    q = ("SELECT p.*, COALESCE(s.qty, 0) AS stock_qty FROM products p "
+         "LEFT JOIN stock s ON s.product_id = p.id "
+         "LEFT JOIN product_groups g ON g.name = p.group_name")
     if not include_archived:
         q += " WHERE p.archived = 0"
-    q += " ORDER BY p.group_name, p.name"
+    q += GROUP_ORDER_SQL
     return [dict(r) for r in conn.execute(q)]
 
 
@@ -203,9 +236,11 @@ def product_create(conn, name, unit, purchase_price, retail_price, group_name=""
         dup = conn.execute("SELECT id FROM products WHERE lower(name)=lower(?)", (name,)).fetchone()
         if dup:
             raise ValueError("Товар с таким названием уже есть")
+        grp = _norm_group(group_name)
+        _ensure_group(conn, grp)
         cur = conn.execute(
             "INSERT INTO products(name, group_name, unit, purchase_price, retail_price) VALUES(?,?,?,?,?)",
-            (name, (group_name or "").strip(), unit, pp, rp),
+            (name, grp, unit, pp, rp),
         )
         conn.execute("INSERT OR IGNORE INTO stock(product_id, qty) VALUES(?, 0)", (cur.lastrowid,))
     return _product(conn, cur.lastrowid)
@@ -255,7 +290,9 @@ def product_update(conn, pid, name=None, unit=None, purchase_price=None, retail_
         if archived is not None:
             conn.execute("UPDATE products SET archived=? WHERE id=?", (1 if archived else 0, pid))
         if group_name is not None:
-            conn.execute("UPDATE products SET group_name=? WHERE id=?", (group_name.strip(), pid))
+            grp = _norm_group(group_name)
+            _ensure_group(conn, grp)
+            conn.execute("UPDATE products SET group_name=? WHERE id=?", (grp, pid))
     return _product(conn, pid)
 
 
@@ -906,12 +943,12 @@ def doc_get(conn, doc_id):
     # цепочка: родитель и дети
     chain = []
     if d["parent_id"]:
-        pr = conn.execute("SELECT id, type, date, status, amount FROM docs WHERE id=?",
+        pr = conn.execute("SELECT id, type, date, ts, status, amount FROM docs WHERE id=?",
                           (d["parent_id"],)).fetchone()
         if pr:
             chain.append({**dict(pr), "rel": "parent"})
     for ch in conn.execute(
-        "SELECT id, type, date, status, amount FROM docs WHERE parent_id=? ORDER BY id",
+        "SELECT id, type, date, ts, status, amount FROM docs WHERE parent_id=? ORDER BY id",
         (doc_id,),
     ):
         chain.append({**dict(ch), "rel": "child"})
@@ -1000,11 +1037,13 @@ def stock_report(conn):
     for p in conn.execute(
         "SELECT p.*, COALESCE(s.qty,0) qty FROM products p "
         "LEFT JOIN stock s ON s.product_id = p.id "
-        "WHERE COALESCE(s.qty,0) > ? ORDER BY p.group_name, p.name", (EPS,),
+        "LEFT JOIN product_groups g ON g.name = p.group_name "
+        "WHERE COALESCE(s.qty,0) > ?" + GROUP_ORDER_SQL, (EPS,),
     ):
         qty = float(p["qty"])
         pv, rv = r2(qty * p["purchase_price"]), r2(qty * p["retail_price"])
         rows.append({"product_id": p["id"], "name": p["name"], "unit": p["unit"], "qty": qty,
+                     "group_name": p["group_name"],
                      "purchase_price": p["purchase_price"], "retail_price": p["retail_price"],
                      "purchase_value": pv, "retail_value": rv})
         if p["unit"] == "кг":
