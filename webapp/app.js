@@ -175,7 +175,7 @@ function screen(title, html, sub) {
 (function () {
   const sc = () => document.getElementById('screen');
   const EDGE = 32;  // зона старта у левой кромки
-  const ACT = 10;   // сдвиг, после которого жест признан (тап не страдает)
+  const ACT = 6;    // сдвиг, после которого жест признан (тап не страдает)
   const EASE = 'cubic-bezier(.2,.7,.3,1)';
   let t0 = null;
   let under = null;
@@ -298,7 +298,10 @@ function screen(title, html, sub) {
     const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
     if (!t0.drag) {
       // уверенное вертикальное движение — отдаём прокрутке
-      if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx) * 1.2) { t0.dead = true; return; }
+      if (Math.abs(dy) > 8 && Math.abs(dy) > Math.abs(dx)) { t0.dead = true; return; }
+      // ВАЖНО: глушим дефолт с первого же движения от кромки, иначе WebView
+      // Телеграма заберёт жест себе и пришлёт touchcancel на полпути
+      if (e.cancelable) e.preventDefault();
       if (dx > ACT && dx > Math.abs(dy)) {
         t0.drag = true;
         if (!under) makeUnder();
@@ -453,6 +456,7 @@ const ROW_ICONS = {
   gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
   arrowup: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V6"/><path d="m6 12 6-6 6 6"/></svg>',
+  box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5Z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>',
   cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M3.5 9.5h17"/><path d="M8 3v4"/><path d="M16 3v4"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20v-8"/><path d="M10 20V5"/><path d="M16 20v-11"/><path d="M22 20H2"/></svg>',
 };
@@ -1605,6 +1609,7 @@ async function S_reports() {
     ]) +
     '<div class="shsec">Склад</div>' +
     menuRows([
+      ['ost', 'box', 'Отчёт по остаткам'],
       ['mv', 'swap', 'Отчёт по движению'],
       ['inv', 'clipboard', 'Отчёт об инвентаризации'],
     ]) +
@@ -1620,6 +1625,7 @@ async function S_reports() {
     sm: () => push(S_repPeriod, 'month'),
     sp: () => push(S_repProducts),
     sg: () => push(S_repGroups),
+    ost: () => push(S_repStock),
     mv: () => push(S_repMovement),
     inv: () => push(S_repInventory),
     sellers: () => push(S_repSellers),
@@ -1715,6 +1721,35 @@ async function S_repGroups() {
       : '<div class="hint small">Продаж за период нет</div>') + '</div>';
   const el = screen('Продажи по категориям', html, true);
   chips.bind(el);
+}
+
+async function S_repStock() {
+  const r = await api('/api/stock');
+  const t = r.totals;
+  const rows = r.rows.map((p, i) =>
+    '<div class="row skrow" data-name="' + esc(p.name.toLowerCase()) + '">' +
+    '<div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' + esc(p.name) +
+    '</div><div class="sub">сумма продажи ' + fmtM(p.retail_value) + ' • себестоимость ' +
+    fmtM(p.purchase_value) + '</div></div>' +
+    '<div class="r val">' + fmtQ(p.qty, p.unit) + '</div></div>').join('');
+  const html =
+    '<div class="tiles">' +
+    '<div class="tile"><div class="tl">Всего кг</div><div class="tv">' + NF3.format(t.kg) +
+    '</div></div>' +
+    '<div class="tile"><div class="tl">Себестоимость</div><div class="tv">' +
+    fmtM(t.purchase_value) + '</div></div>' +
+    '<div class="tile"><div class="tl">Сумма продаж</div><div class="tv">' +
+    fmtM(t.retail_value) + '</div></div>' +
+    '</div>' +
+    '<div class="field"><input id="ro-q" placeholder="🔍 Поиск по остаткам…"></div>' +
+    '<div class="card">' + (rows || '<div class="hint small">Склад пуст</div>') + '</div>';
+  const el = screen('Отчёт по остаткам', html, true);
+  el.querySelector('#ro-q').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase().trim();
+    el.querySelectorAll('.skrow').forEach(row => {
+      row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
+    });
+  });
 }
 
 async function S_repMovement() {
@@ -1910,7 +1945,11 @@ function bookingsLine(x) {
     (x.bookings.length > 3 ? ' • ещё ' + (x.bookings.length - 3) : '') + '</div>';
 }
 
-function bookingBlock(el, kind, refId, meta) {
+function bookingBlock(el, kind, refId, meta, ev) {
+  // у мероприятия даты уже заданы — бронируем на его срок без выбора;
+  // диапазон выбирается только у постоянных точек (ТЦ, рынок, магазин)
+  const fixed = kind === 'event' && ev && ev.date_from
+    ? { from: ev.date_from, to: ev.date_to || ev.date_from } : null;
   const box = el.querySelector('#bk-box');
   const drawList = async () => {
     const r = await api('/api/bookings?kind=' + kind + '&ref_id=' + refId);
@@ -1925,9 +1964,12 @@ function bookingBlock(el, kind, refId, meta) {
   };
   box.innerHTML =
     '<h3>🔒 Брони</h3><div id="bk-list"></div>' +
-    '<div class="grid2" style="margin-top:10px">' +
-    '<input type="date" id="bk-from" value="' + today() + '">' +
-    '<input type="date" id="bk-to" value=""></div>' +
+    (fixed
+      ? '<div class="hint small" style="margin-top:10px">📅 Бронь на срок мероприятия: ' +
+        dstr(fixed.from) + (fixed.to !== fixed.from ? ' – ' + dstr(fixed.to) : '') + '</div>'
+      : '<div class="grid2" style="margin-top:10px">' +
+        '<input type="date" id="bk-from" value="' + today() + '">' +
+        '<input type="date" id="bk-to" value=""></div>') +
     '<div class="field" style="margin-top:8px"><select id="bk-who">' +
     meta.people.map(pp => '<option value="' + pp.id + '"' +
       (pp.id === ME.id ? ' selected' : '') + '>' + esc(pp.name) + '</option>').join('') +
@@ -1939,8 +1981,8 @@ function bookingBlock(el, kind, refId, meta) {
       await api('/api/bookings', 'POST', {
         kind, ref_id: refId,
         user_id: +box.querySelector('#bk-who').value,
-        date_from: box.querySelector('#bk-from').value,
-        date_to: box.querySelector('#bk-to').value,
+        date_from: fixed ? fixed.from : box.querySelector('#bk-from').value,
+        date_to: fixed ? fixed.to : box.querySelector('#bk-to').value,
       });
       toast('Забронировано ✓', true);
       drawList();
@@ -2388,7 +2430,7 @@ async function S_eventView(ev, meta) {
     '<div class="card" id="bk-box"></div>' +
     '<button class="btn secondary" id="ev-edit">✏️ Редактировать</button>';
   const el = screen('Мероприятие', html, true);
-  bookingBlock(el, 'event', ev.id, meta);
+  bookingBlock(el, 'event', ev.id, meta, ev);
   el.querySelector('#ev-edit').onclick = () => push(S_eventEdit, ev, meta);
 }
 
@@ -2413,7 +2455,7 @@ async function S_eventEdit(ev, meta) {
     (ev && (ME.role === 'admin' || ev.created_by === ME.id)
       ? '<button class="btn danger" id="ee-del">Удалить</button>' : '');
   const el = screen(ev ? 'Мероприятие' : 'Новое мероприятие', html, true);
-  if (ev) bookingBlock(el, 'event', ev.id, meta);
+  if (ev) bookingBlock(el, 'event', ev.id, meta, ev);
   el.querySelector('#ee-save').onclick = async () => {
     try {
       await api('/api/events', 'POST', {
