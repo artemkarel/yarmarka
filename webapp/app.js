@@ -1246,8 +1246,7 @@ async function S_invReport(docId) {
 }
 
 // ===== мероприятия и точки =====
-const PL_STATE = { seg: 'events', calMode: 'day', selKey: null,
-  citySel: [], etypes: [], ptypes: [] };
+const PL_STATE = { calMode: 'day', selKey: null, citySel: [], typeSel: [], whoSel: [] };
 const RU_M_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт',
   'ноя', 'дек'];
 const RU_DW = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
@@ -1360,9 +1359,16 @@ function isBooked(x) {
 }
 
 function bookBtnHtml(x, attr) {
-  return isBooked(x)
-    ? '<button class="bookbtn booked">Забронировано</button>'
-    : '<button class="bookbtn" ' + attr + '="' + x.id + '">Забронировать</button>';
+  if (isBooked(x)) {
+    // своя бронь в приоритете — её и предлагаем снять одним тапом
+    const bk = x.bookings.find(b => b.user_id === ME.id || b.created_by === ME.id) ||
+      x.bookings[0];
+    const info = bk.user_name + ', ' + dstr(bk.date_from) +
+      (bk.date_to !== bk.date_from ? ' – ' + dstr(bk.date_to) : '');
+    return '<button class="bookbtn booked" data-unbook="' + bk.id + '" data-bkinfo="' +
+      esc(info) + '">Забронировано</button>';
+  }
+  return '<button class="bookbtn" ' + attr + '="' + x.id + '">Забронировать</button>';
 }
 
 function evCardHtml(ev, n) {
@@ -1419,183 +1425,190 @@ function ptListHtml(points) {
     : '<div class="card hint">Точек не найдено</div>';
 }
 
-// фильтры «два в одном»: кнопка со счётчиком + выпадающий список с мультивыбором
-function filtersHtml(cityCount, typeCount) {
-  return '<div class="grid2" style="margin-bottom:10px">' +
-    '<button class="btn secondary" id="fl-city-btn" style="margin:0;padding:11px">🏙 Города' +
-    (cityCount ? ' (' + cityCount + ')' : '') + ' ▾</button>' +
-    '<button class="btn secondary" id="fl-type-btn" style="margin:0;padding:11px">🎪 Вид' +
-    (typeCount ? ' (' + typeCount + ')' : '') + ' ▾</button></div>' +
-    '<div class="card" id="fl-city-panel" hidden>' +
-    '<div class="field"><input id="fl-city-q" placeholder="🔍 Поиск города…" autocomplete="off">' +
-    '</div><div id="fl-city-list" style="max-height:45vh;overflow-y:auto"></div></div>' +
-    '<div class="card" id="fl-type-panel" hidden><div id="fl-type-list"></div></div>';
+// ===== единая лента: мероприятия + постоянные точки, фильтры нижним листом =====
+
+function whoMatch(x, whoSel) {
+  if (!whoSel.length) return true;
+  if (whoSel.includes('free') && !x.owner_user_id && !isBooked(x)) return true;
+  return whoSel.some(id => x.owner_user_id === id ||
+    (x.bookings || []).some(b => b.user_id === id));
 }
 
-function bindFilters(el, cities, types, selCities, selTypes, onChange) {
-  const cityBtn = el.querySelector('#fl-city-btn');
-  const typeBtn = el.querySelector('#fl-type-btn');
-  const cityPanel = el.querySelector('#fl-city-panel');
-  const typePanel = el.querySelector('#fl-type-panel');
-  const drawList = (box, options, sel, key) => {
-    box.innerHTML = options.map(o =>
-      '<div class="row" data-' + key + '="' + esc(o) + '" style="cursor:pointer">' +
-      '<div class="l small">' + esc(o) + '</div>' +
-      '<div class="r val green">' + (sel.includes(o) ? '✓' : '') + '</div></div>').join('') ||
-      '<div class="hint small">Пусто</div>';
+function openFilterSheet(opts) {
+  const bg = document.createElement('div');
+  bg.className = 'sheetbg';
+  const sh = document.createElement('div');
+  sh.className = 'sheet';
+  const chip = (attr, val, label, on) =>
+    '<button class="chip' + (on ? ' on' : '') + '" data-' + attr + '="' + esc(String(val)) +
+    '">' + esc(label) + '</button>';
+  const draw = () => {
+    const cityQ = (sh.querySelector('#sh-cq') || {}).value || '';
+    const cities = opts.cities.filter(c =>
+      !cityQ.trim() || c.toLowerCase().includes(cityQ.toLowerCase().trim()));
+    sh.innerHTML =
+      '<div class="sheethandle"></div>' +
+      '<h3 style="margin-bottom:10px">Фильтры</h3>' +
+      '<div class="shsec">Город</div>' +
+      '<div class="field"><input id="sh-cq" placeholder="🔍 Поиск города…" value="' +
+      esc(cityQ) + '" autocomplete="off"></div>' +
+      '<div class="chipwrap">' +
+      cities.slice(0, 60).map(c =>
+        chip('shc', c, c, opts.sel.citySel.includes(c))).join('') + '</div>' +
+      '<div class="shsec">Вид</div><div class="chipwrap">' +
+      opts.types.map(t => chip('sht', t, t, opts.sel.typeSel.includes(t))).join('') + '</div>' +
+      '<div class="shsec">Кто едет</div><div class="chipwrap">' +
+      chip('shw', 'free', 'Свободные', opts.sel.whoSel.includes('free')) +
+      opts.people.map(p =>
+        chip('shw', p.id, p.name, opts.sel.whoSel.includes(p.id))).join('') + '</div>' +
+      '<div class="sheetfoot">' +
+      '<button class="btn secondary" id="sh-reset" style="margin:0">Сбросить</button>' +
+      '<button class="btn" id="sh-show" style="margin:0">Показать (' + opts.count() +
+      ')</button></div>';
+    const cq = sh.querySelector('#sh-cq');
+    cq.addEventListener('input', () => {
+      const pos = cq.selectionStart;
+      draw();
+      const cq2 = sh.querySelector('#sh-cq');
+      cq2.focus();
+      cq2.setSelectionRange(pos, pos);
+    });
   };
-  const labels = () => {
-    cityBtn.innerHTML = '🏙 Города' + (selCities.length ? ' (' + selCities.length + ')' : '') + ' ▾';
-    typeBtn.innerHTML = '🎪 Вид' + (selTypes.length ? ' (' + selTypes.length + ')' : '') + ' ▾';
-  };
-  const redraw = () => {
-    const q = (el.querySelector('#fl-city-q').value || '').toLowerCase().trim();
-    drawList(el.querySelector('#fl-city-list'),
-      cities.filter(c => !q || c.toLowerCase().includes(q)), selCities, 'flc');
-    drawList(el.querySelector('#fl-type-list'), types, selTypes, 'flt');
-  };
-  redraw();
-  cityBtn.onclick = () => { cityPanel.hidden = !cityPanel.hidden; typePanel.hidden = true; };
-  typeBtn.onclick = () => { typePanel.hidden = !typePanel.hidden; cityPanel.hidden = true; };
-  el.querySelector('#fl-city-q').addEventListener('input', redraw);
-  el.addEventListener('click', e => {
-    const c = e.target.closest('[data-flc]');
-    const t = e.target.closest('[data-flt]');
-    if (!c && !t) return;
-    const val = c ? c.dataset.flc : t.dataset.flt;
-    const arr = c ? selCities : selTypes;
+  const close = () => { bg.remove(); sh.remove(); opts.onClose(); };
+  bg.onclick = close;
+  sh.addEventListener('click', e => {
+    if (e.target.id === 'sh-reset') {
+      opts.sel.citySel.length = 0;
+      opts.sel.typeSel.length = 0;
+      opts.sel.whoSel.length = 0;
+      draw();
+      return;
+    }
+    if (e.target.id === 'sh-show') { close(); return; }
+    const c = e.target.closest('[data-shc]');
+    const t = e.target.closest('[data-sht]');
+    const w = e.target.closest('[data-shw]');
+    if (!c && !t && !w) return;
+    const arr = c ? opts.sel.citySel : t ? opts.sel.typeSel : opts.sel.whoSel;
+    let val = c ? c.dataset.shc : t ? t.dataset.sht : w.dataset.shw;
+    if (w && val !== 'free') val = +val;
     const i = arr.indexOf(val);
     if (i >= 0) arr.splice(i, 1); else arr.push(val);
-    labels();
-    redraw();
-    onChange();
+    draw();
   });
+  document.body.appendChild(bg);
+  document.body.appendChild(sh);
+  draw();
 }
 
 async function S_places() {
   const meta = await api('/api/places/meta');
-  const isEv = PL_STATE.seg === 'events';
-  let listHtml = '';
-  let calHtml = '';
-  let allEvents = [];
-  let allPoints = [];
-  let per = null;
+  const [evResp, ptResp] = await Promise.all([
+    api('/api/events?when=all'), api('/api/points'),
+  ]);
+  let allEvents = evResp.events;
+  let allPoints = ptResp.points;
+  const sel = PL_STATE; // citySel / typeSel / whoSel живут в состоянии вкладки
   const evMatch = ev =>
-    (!PL_STATE.citySel.length || PL_STATE.citySel.includes(ev.city)) &&
-    (!PL_STATE.etypes.length || PL_STATE.etypes.includes(ev.etype || 'Другое'));
+    (!sel.citySel.length || sel.citySel.includes(ev.city)) &&
+    (!sel.typeSel.length || sel.typeSel.includes(ev.etype || 'Другое')) &&
+    whoMatch(ev, sel.whoSel);
   const ptMatch = pt =>
-    (!PL_STATE.citySel.length || PL_STATE.citySel.includes(pt.city)) &&
-    (!PL_STATE.ptypes.length || PL_STATE.ptypes.includes(pt.ptype || 'Другое'));
-  let typeOptions = [];
-  if (isEv) {
-    allEvents = (await api('/api/events?when=all')).events;
-    typeOptions = [...new Set(allEvents.map(x => x.etype || 'Другое'))].sort();
-    const evs = allEvents.filter(evMatch);
-    if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
-    const items = calItems(PL_STATE.calMode);
-    if (!items.some(it => it.key === PL_STATE.selKey)) {
-      PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
-    }
-    const strip = items.map(it => {
-      const has = evs.some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, it.key)));
-      return '<div class="ditem' + (it.wide ? ' wide' : '') +
-        (it.key === PL_STATE.selKey ? ' sel' : '') + (has ? '' : ' off') +
-        '" data-cal="' + it.key + '" data-month="' + it.month + '">' +
-        '<div class="dw' + (it.we ? ' we' : '') + '">' + it.dw + '</div>' +
-        '<div class="dn">' + it.dn + '</div></div>';
-    }).join('');
-    const modes = [['day', 'По дням'], ['month', 'По месяцам']];
-    calHtml =
-      '<div class="seg" id="cal-mode">' + modes.map(m =>
-        '<button' + (PL_STATE.calMode === m[0] ? ' class="on"' : '') + ' data-mode="' + m[0] +
-        '">' + m[1] + '</button>').join('') + '</div>' +
-      '<div class="calwrap"><div class="calbar">' +
-      '<div class="calmonth" id="cal-month"></div>' +
-      '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
-      '<button class="calarr left" id="cal-prev">‹</button>' +
-      '<button class="calarr right" id="cal-next">›</button></div>';
-    per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
-    listHtml = evListHtml(evs, per);
-  } else {
-    allPoints = (await api('/api/points')).points;
-    typeOptions = [...new Set(allPoints.map(x => x.ptype || 'Другое'))].sort();
-    listHtml = ptListHtml(allPoints.filter(ptMatch));
+    (!sel.citySel.length || sel.citySel.includes(pt.city)) &&
+    (!sel.typeSel.length || sel.typeSel.includes(pt.ptype || 'Другое')) &&
+    whoMatch(pt, sel.whoSel);
+  const typeOptions = [...new Set(
+    allEvents.map(x => x.etype || 'Другое').concat(allPoints.map(x => x.ptype || 'Другое'))
+  )].sort();
+  if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
+  const items = calItems(PL_STATE.calMode);
+  if (!items.some(it => it.key === PL_STATE.selKey)) {
+    PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
   }
-  const selTypes = isEv ? PL_STATE.etypes : PL_STATE.ptypes;
-  const html =
-    '<div class="seg" id="pl-seg"><button' + (isEv ? ' class="on"' : '') +
-    '>📅 Мероприятия</button><button' + (!isEv ? ' class="on"' : '') + '>📍 Точки</button></div>' +
-    '<button class="btn" id="pl-add">+ Добавить ' + (isEv ? 'мероприятие' : 'точку') + '</button>' +
-    calHtml +
-    filtersHtml(PL_STATE.citySel.length, selTypes.length) +
-    '<div id="pl-list">' + listHtml + '</div>';
-  const el = screen('', html);
-  el.querySelectorAll('#pl-seg button').forEach((b, i) => {
-    b.onclick = () => { PL_STATE.seg = i === 0 ? 'events' : 'points'; render(); };
-  });
-  el.querySelector('#pl-add').onclick = () =>
-    push(isEv ? S_eventEdit : S_pointEdit, null, meta);
-  const applyFilters = () => {
-    const listEl = el.querySelector('#pl-list');
-    if (isEv) {
-      const evs = allEvents.filter(evMatch);
-      listEl.innerHTML = evListHtml(evs, per);
-      const stripEl = el.querySelector('#cal-strip');
-      for (const c of stripEl.children) {
-        const has = evs.some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, c.dataset.cal)));
-        c.classList.toggle('off', !has);
-      }
-    } else {
-      listEl.innerHTML = ptListHtml(allPoints.filter(ptMatch));
-    }
+  let per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
+  const evsF = () => allEvents.filter(evMatch);
+  const ptsF = () => allPoints.filter(ptMatch);
+  const listBlock = () => {
+    const pts = ptsF();
+    return evListHtml(evsF(), per) +
+      (pts.length
+        ? '<div class="hint small" style="margin:16px 4px 8px;font-weight:700">📍 ПОСТОЯННЫЕ ' +
+          'ТОЧКИ</div>' + ptListHtml(pts)
+        : '');
   };
-  bindFilters(el, meta.cities, typeOptions, PL_STATE.citySel, selTypes, applyFilters);
-  if (isEv) {
+  const nActive = () => sel.citySel.length + sel.typeSel.length + sel.whoSel.length;
+  const strip = items.map(it => {
+    const has = evsF().some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, it.key)));
+    return '<div class="ditem' + (it.wide ? ' wide' : '') +
+      (it.key === PL_STATE.selKey ? ' sel' : '') + (has ? '' : ' off') +
+      '" data-cal="' + it.key + '" data-month="' + it.month + '">' +
+      '<div class="dw' + (it.we ? ' we' : '') + '">' + it.dw + '</div>' +
+      '<div class="dn">' + it.dn + '</div></div>';
+  }).join('');
+  const modes = [['day', 'По дням'], ['month', 'По месяцам']];
+  const html =
+    '<div class="calwrap"><div class="calbar">' +
+    '<div class="calmonth" id="cal-month"></div>' +
+    '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
+    '<button class="calarr left" id="cal-prev">‹</button>' +
+    '<button class="calarr right" id="cal-next">›</button></div>' +
+    '<div class="seg" id="cal-mode">' + modes.map(m =>
+      '<button' + (PL_STATE.calMode === m[0] ? ' class="on"' : '') + ' data-mode="' + m[0] +
+      '">' + m[1] + '</button>').join('') + '</div>' +
+    '<button class="btn secondary" id="fl-open" style="padding:12px" data-nact="1"></button>' +
+    '<div class="addline"><span data-add="event">+ мероприятие</span>' +
+    '<span data-add="point">+ точка</span></div>' +
+    '<div id="pl-list">' + listBlock() + '</div>';
+  const el = screen('', html);
+  const flBtn = el.querySelector('#fl-open');
+  const flLabel = () => {
+    flBtn.textContent = '⚙️ Фильтры' + (nActive() ? ' (' + nActive() + ')' : '');
+  };
+  flLabel();
+  const applyAll = () => {
+    per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
+    el.querySelector('#pl-list').innerHTML = listBlock();
     const stripEl = el.querySelector('#cal-strip');
-    const monthEl = el.querySelector('#cal-month');
-    const updMonth = () => {
-      let label = '';
-      for (const c of stripEl.children) {
-        if (c.offsetLeft - stripEl.offsetLeft + c.offsetWidth - stripEl.scrollLeft > 8) {
-          label = c.dataset.month || c.querySelector('.dw').textContent;
-          break;
-        }
-      }
-      monthEl.textContent = label;
-    };
-    stripEl.addEventListener('scroll', () => {
-      clearTimeout(stripEl._t);
-      stripEl._t = setTimeout(updMonth, 80);
-    });
-    const sel = stripEl.querySelector('.ditem.sel');
-    if (sel) {
-      stripEl.style.scrollBehavior = 'auto';
-      sel.scrollIntoView({ inline: 'center', block: 'nearest' });
-      stripEl.style.scrollBehavior = '';
-      window.scrollTo(0, 0);
+    for (const c of stripEl.children) {
+      const has = evsF().some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, c.dataset.cal)));
+      c.classList.toggle('off', !has);
     }
-    updMonth();
-    el.querySelector('#cal-prev').onclick = () => {
-      stripEl.scrollLeft -= stripEl.clientWidth * 0.8;
-    };
-    el.querySelector('#cal-next').onclick = () => {
-      stripEl.scrollLeft += stripEl.clientWidth * 0.8;
-    };
-    el.querySelector('#cal-mode').addEventListener('click', e => {
-      const b = e.target.closest('[data-mode]');
-      if (!b) return;
-      PL_STATE.calMode = b.dataset.mode;
-      PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
-      render();
-    });
-  }
+    flLabel();
+  };
+  flBtn.onclick = () => openFilterSheet({
+    cities: meta.cities, types: typeOptions, people: meta.people, sel,
+    count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
+    onClose: applyAll,
+  });
   el.addEventListener('click', async e => {
+    const add = e.target.closest('[data-add]');
+    if (add) {
+      push(add.dataset.add === 'event' ? S_eventEdit : S_pointEdit, null, meta);
+      return;
+    }
     const cal = e.target.closest('[data-cal]');
-    if (cal) { PL_STATE.selKey = cal.dataset.cal; render(); return; }
+    if (cal) {
+      PL_STATE.selKey = cal.dataset.cal;
+      el.querySelectorAll('.ditem').forEach(d =>
+        d.classList.toggle('sel', d.dataset.cal === cal.dataset.cal));
+      applyAll();
+      return;
+    }
+    const ub = e.target.closest('[data-unbook]');
+    if (ub) {
+      if (!(await confirmDlg('Снять бронь (' + ub.dataset.bkinfo + ')?'))) return;
+      try {
+        await api('/api/bookings/' + ub.dataset.unbook, 'DELETE');
+        toast('Бронь снята ✓', true);
+        allEvents = (await api('/api/events?when=all')).events;
+        allPoints = (await api('/api/points')).points;
+        applyAll();
+      } catch (err) { toast(err.message); }
+      return;
+    }
     const eb = e.target.closest('[data-ebook]');
     if (eb) {
-      // бронь мероприятия в один тап — сразу, без подтверждения,
-      // на выбранную в календаре дату (в пределах дат события)
+      // бронь мероприятия в один тап — на выбранную в календаре дату
       const ev = allEvents.find(x => x.id === +eb.dataset.ebook);
       const evTo = ev.date_to || ev.date_from;
       const from = per.from > ev.date_from ? per.from : ev.date_from;
@@ -1606,13 +1619,12 @@ async function S_places() {
         });
         toast('Забронировано ✓', true);
         allEvents = (await api('/api/events?when=all')).events;
-        applyFilters();
+        applyAll();
       } catch (err) { toast(err.message); }
       return;
     }
     const bk = e.target.closest('[data-book]');
     if (bk) {
-      // показать выбор дат прямо в карточке
       const f = el.querySelector('[data-bkform="' + bk.dataset.book + '"]');
       if (f) f.hidden = !f.hidden;
       return;
@@ -1628,14 +1640,14 @@ async function S_places() {
         });
         toast('Забронировано ✓', true);
         allPoints = (await api('/api/points')).points;
-        applyFilters();
+        applyAll();
       } catch (err) { toast(err.message); }
       return;
     }
-    if (e.target.closest('.bkform')) return; // клики по форме дат — не навигация
+    if (e.target.closest('.bkform')) return;
     const ec = e.target.closest('[data-eid]');
     if (ec) {
-      push(S_eventEdit, allEvents.find(x => x.id === +ec.dataset.eid), meta);
+      push(S_eventView, allEvents.find(x => x.id === +ec.dataset.eid), meta);
       return;
     }
     const pc = e.target.closest('[data-ptid]');
@@ -1643,8 +1655,44 @@ async function S_places() {
       push(S_pointEdit, allPoints.find(x => x.id === +pc.dataset.ptid), meta, false);
     }
   });
+  const stripEl = el.querySelector('#cal-strip');
+  const monthEl = el.querySelector('#cal-month');
+  const updMonth = () => {
+    let label = '';
+    for (const c of stripEl.children) {
+      if (c.offsetLeft - stripEl.offsetLeft + c.offsetWidth - stripEl.scrollLeft > 8) {
+        label = c.dataset.month || c.querySelector('.dw').textContent;
+        break;
+      }
+    }
+    monthEl.textContent = label;
+  };
+  stripEl.addEventListener('scroll', () => {
+    clearTimeout(stripEl._t);
+    stripEl._t = setTimeout(updMonth, 80);
+  });
+  const selItem = stripEl.querySelector('.ditem.sel');
+  if (selItem) {
+    stripEl.style.scrollBehavior = 'auto';
+    selItem.scrollIntoView({ inline: 'center', block: 'nearest' });
+    stripEl.style.scrollBehavior = '';
+    window.scrollTo(0, 0);
+  }
+  updMonth();
+  el.querySelector('#cal-prev').onclick = () => {
+    stripEl.scrollLeft -= stripEl.clientWidth * 0.8;
+  };
+  el.querySelector('#cal-next').onclick = () => {
+    stripEl.scrollLeft += stripEl.clientWidth * 0.8;
+  };
+  el.querySelector('#cal-mode').addEventListener('click', e => {
+    const b = e.target.closest('[data-mode]');
+    if (!b) return;
+    PL_STATE.calMode = b.dataset.mode;
+    PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
+    render();
+  });
 }
-
 
 function ownerSelect(id, meta, current) {
   return '<div class="field"><label>Кто туда ездит</label><select id="' + id + '">' +
@@ -2171,11 +2219,13 @@ async function S_userAdd(roles) {
     '<div class="field"><label>Роль</label><select id="ua-role">' +
     roles.map(x => '<option value="' + x[0] + '">' + x[1] + '</option>').join('') +
     '</select></div>' +
+    '<div class="field"><label>Ник в Telegram (необязательно)</label>' +
+    '<input id="ua-nick" placeholder="@username"></div>' +
     '<div class="field"><label>Telegram ID (необязательно)</label>' +
     '<input id="ua-tgid" inputmode="numeric" placeholder="например, 123456789"></div>' +
-    '<div class="card hint small">Если указать Telegram ID (человек может узнать его командой ' +
-    '/id у бота), при первом входе он сразу попадёт в свой аккаунт и будет получать ' +
-    'уведомления. Без ID аккаунт работает только внутри системы.</div>' +
+    '<div class="card hint small">Укажи ник или Telegram ID — тогда человек при первом входе ' +
+    'сразу попадёт в свой аккаунт и будет получать уведомления. ID можно узнать командой ' +
+    '/id у бота. Без ника и ID аккаунт работает только внутри системы.</div>' +
     '<button class="btn" id="ua-save">Добавить</button>';
   const el = screen('Новый пользователь', html, true);
   el.querySelector('#ua-save').onclick = async () => {
@@ -2184,6 +2234,7 @@ async function S_userAdd(roles) {
         first_name: el.querySelector('#ua-first').value,
         last_name: el.querySelector('#ua-last').value,
         role: el.querySelector('#ua-role').value,
+        username: el.querySelector('#ua-nick').value.trim() || null,
         tg_id: el.querySelector('#ua-tgid').value.trim() || null,
       });
       toast('Пользователь добавлен ✓', true);

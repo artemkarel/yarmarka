@@ -113,6 +113,8 @@ def api_auth(request: Request, payload: dict = Body(default={})):
     conn = db.get()
     u = services.user_by_tg(conn, tg["id"])
     if u is None:
+        u = services.adopt_manual(conn, tg)  # заведён вручную по нику — привязываем
+    if u is None:
         return {"need_registration": True,
                 "tg": {"first_name": tg.get("first_name", ""), "last_name": tg.get("last_name", "")}}
     if not u["active"]:
@@ -652,7 +654,7 @@ def api_user_create(request: Request, payload: dict = Body(...)):
         raise _err(403, "Только администратор может создавать владельцев")
     return {"user": services.user_create_manual(
         db.get(), payload.get("first_name"), payload.get("last_name"), role,
-        payload.get("tg_id"))}
+        payload.get("tg_id"), payload.get("username"))}
 
 
 @app.put("/api/users/{uid}")
@@ -686,6 +688,16 @@ def api_settings_put(request: Request, payload: dict = Body(...)):
     need_admin(u)
     return {"settings": services.settings_set(db.get(), payload.get("share_pct"),
                                               payload.get("commission_pct"))}
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    """Отдаём index.html без кэша и с версией статики — чтобы Telegram не показывал старьё."""
+    html = (config.WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
+    v = int((config.WEBAPP_DIR / "app.js").stat().st_mtime)
+    html = html.replace('src="app.js"', f'src="app.js?v={v}"')
+    html = html.replace('href="style.css"', f'href="style.css?v={v}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 app.mount("/", StaticFiles(directory=str(config.WEBAPP_DIR), html=True), name="webapp")

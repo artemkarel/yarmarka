@@ -104,7 +104,23 @@ def users_list(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY role, first_name")]
 
 
-def user_create_manual(conn, first_name, last_name, role, tg_id=None):
+def adopt_manual(conn, tg_user):
+    """Привязка реального Telegram-аккаунта к заранее заведённому по нику."""
+    uname = (tg_user.get("username") or "").strip().lstrip("@")
+    if not uname:
+        return None
+    r = conn.execute(
+        "SELECT id FROM users WHERE tg_id < 0 AND lower(username)=lower(?)", (uname,)
+    ).fetchone()
+    if r is None:
+        return None
+    with _lock, conn:
+        conn.execute("UPDATE users SET tg_id=?, username=? WHERE id=?",
+                     (tg_user["id"], tg_user.get("username"), r["id"]))
+    return user_by_id(conn, r["id"])
+
+
+def user_create_manual(conn, first_name, last_name, role, tg_id=None, username=None):
     """Ручное создание пользователя админом/кладовщиком.
 
     Если Telegram ID известен — человек при первом входе сразу попадёт в свой
@@ -126,13 +142,17 @@ def user_create_manual(conn, first_name, last_name, role, tg_id=None):
             raise ValueError("Telegram ID должен быть положительным числом")
     else:
         tg_id = -int(datetime.now(timezone.utc).timestamp() * 1000)
+    username = (username or "").strip().lstrip("@") or None
     with _lock, conn:
         if conn.execute("SELECT 1 FROM users WHERE tg_id=?", (tg_id,)).fetchone():
             raise ValueError("Пользователь с таким Telegram ID уже есть")
+        if username and conn.execute(
+                "SELECT 1 FROM users WHERE lower(username)=lower(?)", (username,)).fetchone():
+            raise ValueError("Пользователь с таким ником уже есть")
         conn.execute(
             "INSERT INTO users(tg_id, username, first_name, last_name, role, tz, created_at) "
             "VALUES(?,?,?,?,?,?,?)",
-            (tg_id, None, first_name, last_name, role, None, now_utc()),
+            (tg_id, username, first_name, last_name, role, None, now_utc()),
         )
     return user_by_tg(conn, tg_id)
 
@@ -905,7 +925,8 @@ def _attach_bookings(conn, kind, rows, today):
     marks = ",".join("?" * len(ids))
     by_ref = {}
     for b in conn.execute(
-        "SELECT b.ref_id, b.date_from, b.date_to, u.first_name || ' ' || u.last_name AS user_name "
+        "SELECT b.id, b.ref_id, b.user_id, b.created_by, b.date_from, b.date_to, "
+        "u.first_name || ' ' || u.last_name AS user_name "
         f"FROM bookings b JOIN users u ON u.id = b.user_id "
         f"WHERE b.kind=? AND b.ref_id IN ({marks}) AND b.date_to >= ? ORDER BY b.date_from",
         [kind] + ids + [today],

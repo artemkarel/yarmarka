@@ -117,6 +117,27 @@ details.doc .doclines{ padding:0 14px 12px; }
   font-weight:700; cursor:pointer; line-height:1.2; }
 .bookbtn.booked{ background:var(--red); }
 
+.sheetbg{ position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:65; }
+.sheet{ position:fixed; left:0; right:0; bottom:0; background:var(--card); z-index:70;
+  border-radius:22px 22px 0 0; padding:10px 16px calc(16px +
+  max(env(safe-area-inset-bottom), var(--tg-safe-area-inset-bottom, 0px)));
+  max-height:78vh; overflow-y:auto; max-width:640px; margin:0 auto;
+  animation:sheetUp .22s ease; box-shadow:0 -10px 40px rgba(0,0,0,.25); }
+@keyframes sheetUp{ from{ transform:translateY(40%); opacity:.5; } to{ transform:none; opacity:1; } }
+.sheethandle{ width:38px; height:4px; border-radius:2px; background:var(--sep);
+  margin:2px auto 12px; }
+.sheet h3{ font-size:18px; font-weight:800; }
+.shsec{ font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--hint);
+  font-weight:700; margin:14px 0 8px; }
+.chipwrap{ display:flex; flex-wrap:wrap; gap:6px; }
+.chipwrap .chip{ background:var(--bg); }
+.chipwrap .chip.on{ background:var(--accent); color:var(--accent-text); }
+.sheetfoot{ display:grid; grid-template-columns:1fr 1.4fr; gap:8px; margin-top:18px; }
+
+.addline{ text-align:right; margin:2px 4px 10px; }
+.addline span{ color:var(--hint); font-size:13px; font-weight:600; cursor:pointer;
+  margin-left:14px; }
+
 .calwrap{ position:relative; margin-bottom:10px; }
 .calbar{ display:flex; align-items:center; background:var(--card); border-radius:16px;
   padding:8px 30px 8px 30px; }
