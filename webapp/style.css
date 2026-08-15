@@ -219,8 +219,14 @@ details.doc .doclines{ padding:0 14px 12px; }
 .place .plfoot{ padding-right:96px; }
 .bookbtn{ position:absolute; right:12px; bottom:12px; border:none; background:var(--accent);
   color:var(--accent-text); border-radius:9px; padding:6px 9px; font-size:10.5px;
-  font-weight:700; cursor:pointer; line-height:1.2; }
+  font-weight:700; cursor:pointer; line-height:1.2;
+  transition:transform .15s ease, background .25s ease, opacity .2s; }
+.bookbtn:active{ transform:scale(.88); }
 .bookbtn.booked{ background:var(--red); }
+@keyframes bookpulse{ 0%{ transform:scale(1); } 45%{ transform:scale(1.18); }
+  100%{ transform:scale(1); } }
+.pulse{ animation:bookpulse .4s ease; }
+.busy{ opacity:.55; pointer-events:none; }
 
 .sheetbg{ position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:65; }
 .sheet{ position:fixed; left:0; right:0; bottom:0; background:var(--card); z-index:70;

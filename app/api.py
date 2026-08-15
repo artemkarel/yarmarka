@@ -210,6 +210,28 @@ def api_groups_order(request: Request, payload: dict = Body(...)):
     return {"groups": services.groups_set_order(db.get(), payload.get("names") or [])}
 
 
+@app.post("/api/groups")
+def api_groups_create(request: Request, payload: dict = Body(...)):
+    u = current_user(request)
+    need_staff(u)
+    return {"groups": services.groups_create(db.get(), payload.get("name"))}
+
+
+@app.post("/api/groups/rename")
+def api_groups_rename(request: Request, payload: dict = Body(...)):
+    u = current_user(request)
+    need_staff(u)
+    return {"groups": services.groups_rename(db.get(), payload.get("old"),
+                                             payload.get("new"))}
+
+
+@app.post("/api/groups/delete")
+def api_groups_delete(request: Request, payload: dict = Body(...)):
+    u = current_user(request)
+    need_staff(u)
+    return {"groups": services.groups_delete(db.get(), payload.get("name"))}
+
+
 @app.post("/api/products")
 def api_product_create(request: Request, payload: dict = Body(...)):
     u = current_user(request)

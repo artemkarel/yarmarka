@@ -580,6 +580,18 @@ function docCard(d, showSeller, canManage) {
     '<div class="doclines hint small">Загрузка…</div></details>';
 }
 
+// история документов раздела: свежие сверху (по времени создания)
+function histBlock(el, type) {
+  const box = el.querySelector('#hist');
+  if (!box) return;
+  api('/api/docs?type=' + type + '&limit=30').then(r => {
+    if (!r.docs.length) return;
+    box.innerHTML =
+      '<div class="shsec" style="margin:18px 4px 8px">📚 История</div>' +
+      r.docs.map(d => docCard(d, true, false)).join('');
+  }).catch(() => { /* история не критична */ });
+}
+
 window.onDocToggle = async function (ev, id) {
   const det = ev.target;
   if (!det.open || det.dataset.loaded) return;
@@ -1046,7 +1058,9 @@ async function S_chooseSeller(mode) {
     : '<div class="card hint">' + (forSdacha
         ? 'Ни у кого нет товара на руках — принимать нечего.'
         : 'Продавцов пока нет — они появятся после регистрации в боте.') + '</div>';
-  const el = screen(forSdacha ? 'Приём товара' : 'Кому выдать', html, true);
+  const el = screen(forSdacha ? 'Приём товара' : 'Кому выдать',
+    html + '<div id="hist"></div>', true);
+  histBlock(el, forSdacha ? 'sdacha' : 'vydacha');
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-pick]');
     if (!c) return;
@@ -1071,9 +1085,11 @@ async function S_prihod() {
     '<button class="chip" id="pr-more" style="margin-bottom:10px">+ Добавить позицию</button>' +
     '<div class="card" id="pr-total" hidden></div>' +
     '<button class="btn" id="pr-save">Провести поступление</button>' +
-    '<button class="btn secondary" id="pr-draft">💾 Сохранить черновик</button>';
+    '<button class="btn secondary" id="pr-draft">💾 Сохранить черновик</button>' +
+    '<div id="hist"></div>';
   const el = screen('Поступление товара', html, true);
   floatSave(el, '#pr-save');
+  histBlock(el, 'prihod');
   const linesEl = el.querySelector('#pr-lines');
   supplierDropdown(el, sup, id => { supplierId = id; });
 
@@ -1208,8 +1224,10 @@ async function S_invCount(docId) {
     '<div class="field"><input id="ic-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card">' + rows + '</div>' +
     '<button class="btn secondary" id="ic-save">💾 Сохранить подсчёт</button>' +
-    '<button class="btn" id="ic-post">Провести ведомость</button>';
+    '<button class="btn" id="ic-post">Провести ведомость</button>' +
+    '<div id="hist"></div>';
   const el = screen('Инвентаризация', html, true);
+  histBlock(el, 'inventory');
   floatSave(el, '#ic-save'); // ✓ сохраняет подсчёт; проведение — кнопкой внизу
   el.querySelector('#ic-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
@@ -1616,7 +1634,8 @@ async function S_transferPick() {
         '<div class="sub">на руках на ' + fmtM(s.hands_value) + '</div></div>' +
         '<div class="r hint">›</div></div></div>').join('')
     : '<div class="card hint">Ни у кого нет товара на руках — перемещать нечего.</div>';
-  const el = screen('Перемещение товара', html, true);
+  const el = screen('Перемещение товара', html + '<div id="hist"></div>', true);
+  histBlock(el, 'transfer_out');
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-pick]');
     if (!c) return;
@@ -2448,6 +2467,7 @@ async function S_map(opts) {
   };
   const match = x =>
     (!sel.typeSel.length || sel.typeSel.includes((x.etype || x.ptype) || 'Другое')) &&
+    (!sel.citySel.length || sel.citySel.includes(x.city)) &&
     whoMatch(x, sel.whoSel) && textMatch(x);
   // тот же календарь и период, что в ленте точек
   if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey('day');
@@ -2484,10 +2504,11 @@ async function S_map(opts) {
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
   const layer = L.layerGroup().addTo(map);
   const flLabel = () => {
-    el.querySelector('#fl-n').textContent = sel.whoSel.length || '';
-    el.querySelector('#fl-open').classList.toggle('on', !!sel.whoSel.length);
-    el.querySelector('#et-label').textContent = etText(sel);
-    el.querySelector('#et-open').classList.toggle('on', !!sel.typeSel.length);
+    const nf = sel.typeSel.length + sel.whoSel.length;
+    el.querySelector('#fl-n').textContent = nf || '';
+    el.querySelector('#fl-open').classList.toggle('on', !!nf);
+    el.querySelector('#ct-label').textContent = ctText(sel);
+    el.querySelector('#ct-open').classList.toggle('on', !!sel.citySel.length);
   };
   const openCitySheet = (city, arr) => {
     const bg = document.createElement('div');
@@ -2588,12 +2609,8 @@ async function S_map(opts) {
       .concat(allPoints.filter(match)).length,
     onClose: redraw,
   });
-  el.querySelector('#et-open').onclick = () => openFilterSheet({
-    types: typeOptions, people: [], sel, typesOnly: true,
-    count: () => allEvents.filter(ev => evIntersects(ev, perNow())).filter(match)
-      .concat(allPoints.filter(match)).length,
-    onClose: redraw,
-  });
+  el.querySelector('#ct-open').onclick = () =>
+    openCityPick(meta.cities || [], sel, redraw);
   const qInp = el.querySelector('#mp-q');
   qInp.addEventListener('input', () => {
     clearTimeout(qInp._t);
@@ -2663,14 +2680,14 @@ async function S_map(opts) {
   setTimeout(() => { map.invalidateSize(); redraw(); }, 60);
 }
 
-// ряд «пилюль» над лентой и картой — как в афише: лупа, Фильтры, Тип события (+ Карта)
-function etText(sel) {
-  if (!sel.typeSel.length) return 'Тип события';
-  if (sel.typeSel.length === 1) {
-    const t = sel.typeSel[0];
+// ряд «пилюль» над лентой и картой — как в афише: лупа, Фильтры, город (+ Карта)
+function ctText(sel) {
+  if (!sel.citySel.length) return 'Выбрать город';
+  if (sel.citySel.length === 1) {
+    const t = sel.citySel[0];
     return t.length > 16 ? t.slice(0, 15) + '…' : t;
   }
-  return 'Типы: ' + sel.typeSel.length;
+  return 'Города: ' + sel.citySel.length;
 }
 
 function pillRowHtml(sel, qid, withMap) {
@@ -2686,10 +2703,69 @@ function pillRowHtml(sel, qid, withMap) {
     '<circle cx="10" cy="8" r="3.1" fill="currentColor" stroke="none"/>' +
     '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
     'Фильтры<span class="pilln" id="fl-n"></span></button>' +
-    '<button class="pill' + (sel.typeSel.length ? ' on' : '') + '" id="et-open">' +
-    '<span id="et-label">' + esc(etText(sel)) + '</span><span class="pv">⌄</span></button>' +
+    '<button class="pill' + (sel.citySel.length ? ' on' : '') + '" id="ct-open">' +
+    '<span id="ct-label">' + esc(ctText(sel)) + '</span><span class="pv">⌄</span></button>' +
     (withMap ? '<button class="pill mappill" id="map-open">🗺 Карта</button>' : '') +
     '</div>';
+}
+
+// выбор городов: как поиск — вводишь, снизу подсказки, выбирать можно несколько
+function openCityPick(cities, sel, onClose) {
+  const bg = document.createElement('div');
+  bg.className = 'sheetbg';
+  const sh = document.createElement('div');
+  sh.className = 'sheet';
+  sh.innerHTML =
+    '<div class="sheethandle"></div>' +
+    '<h3 style="margin-bottom:10px">Города</h3>' +
+    '<div class="field" style="margin-bottom:6px">' +
+    '<input id="cp-q" placeholder="Начни вводить город…" autocomplete="off"></div>' +
+    '<div id="cp-sel"></div><div id="cp-sug"></div>' +
+    '<div class="sheetfoot">' +
+    '<button class="btn secondary" id="cp-reset" style="margin:0">Сбросить</button>' +
+    '<button class="btn" id="cp-done" style="margin:0">Готово</button></div>';
+  const inp = sh.querySelector('#cp-q');
+  const drawLists = () => {
+    const q = inp.value.toLowerCase().trim();
+    sh.querySelector('#cp-sel').innerHTML = sel.citySel.length
+      ? '<div class="shsec">Выбраны</div><div class="chipwrap">' +
+        sel.citySel.map(c =>
+          '<button class="chip on" data-cp="' + esc(c) + '">' + esc(c) + ' ✕</button>')
+          .join('') + '</div>'
+      : '';
+    const sug = q
+      ? cities.filter(c => !sel.citySel.includes(c) && fuzzyMatch(q, c.toLowerCase()))
+        .slice(0, 24)
+      : [];
+    sh.querySelector('#cp-sug').innerHTML = sug.length
+      ? '<div class="chipwrap" style="margin-top:8px">' +
+        sug.map(c => '<button class="chip" data-cp="' + esc(c) + '">' + esc(c) +
+          '</button>').join('') + '</div>'
+      : (q ? '<div class="hint small" style="margin:8px 4px">Такого города нет</div>' : '');
+  };
+  inp.addEventListener('input', drawLists);
+  const close = () => {
+    document.body.classList.remove('sheet-open');
+    bg.remove(); sh.remove(); onClose();
+  };
+  bg.onclick = close;
+  sh.addEventListener('click', e => {
+    if (e.target.id === 'cp-done') { close(); return; }
+    if (e.target.id === 'cp-reset') { sel.citySel.length = 0; drawLists(); return; }
+    const c = e.target.closest('[data-cp]');
+    if (!c) return;
+    const val = c.dataset.cp;
+    const i = sel.citySel.indexOf(val);
+    if (i >= 0) sel.citySel.splice(i, 1); else sel.citySel.push(val);
+    inp.value = '';
+    drawLists();
+  });
+  bg.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+  document.body.classList.add('sheet-open');
+  document.body.appendChild(bg);
+  document.body.appendChild(sh);
+  drawLists();
+  inp.focus();
 }
 
 function openFilterSheet(opts) {
@@ -2701,18 +2777,16 @@ function openFilterSheet(opts) {
     '<button class="chip' + (on ? ' on' : '') + '" data-' + attr + '="' + esc(String(val)) +
     '">' + esc(label) + '</button>';
   const draw = () => {
-    // город здесь не выбирается — он ищется в основной строке поиска
+    // город выбирается отдельной пилюлей «Выбрать город»
     sh.innerHTML =
       '<div class="sheethandle"></div>' +
-      '<h3 style="margin-bottom:10px">' + (opts.typesOnly ? 'Тип события' : 'Фильтры') +
-      '</h3>' +
-      (opts.typesOnly ? '' : '<div class="shsec">Вид</div>') + '<div class="chipwrap">' +
+      '<h3 style="margin-bottom:10px">Фильтры</h3>' +
+      '<div class="shsec">Тип события</div><div class="chipwrap">' +
       opts.types.map(t => chip('sht', t, t, opts.sel.typeSel.includes(t))).join('') + '</div>' +
-      (opts.typesOnly ? ''
-        : '<div class="shsec">Кто едет</div><div class="chipwrap">' +
-          chip('shw', 'free', 'Свободные', opts.sel.whoSel.includes('free')) +
-          opts.people.map(p =>
-            chip('shw', p.id, p.name, opts.sel.whoSel.includes(p.id))).join('') + '</div>') +
+      '<div class="shsec">Кто едет</div><div class="chipwrap">' +
+      chip('shw', 'free', 'Свободные', opts.sel.whoSel.includes('free')) +
+      opts.people.map(p =>
+        chip('shw', p.id, p.name, opts.sel.whoSel.includes(p.id))).join('') + '</div>' +
       '<div class="sheetfoot">' +
       '<button class="btn secondary" id="sh-reset" style="margin:0">Сбросить</button>' +
       '<button class="btn" id="sh-show" style="margin:0">Показать (' + opts.count() +
@@ -2726,7 +2800,7 @@ function openFilterSheet(opts) {
   sh.addEventListener('click', e => {
     if (e.target.id === 'sh-reset') {
       opts.sel.typeSel.length = 0;
-      if (!opts.typesOnly) opts.sel.whoSel.length = 0;
+      opts.sel.whoSel.length = 0;
       draw();
       return;
     }
@@ -2761,13 +2835,13 @@ async function S_places() {
       (x.city || '').toLowerCase().includes(q) ||
       (x.address || '').toLowerCase().includes(q);
   };
-  sel.citySel.length = 0; // город фильтруется только основной строкой поиска
+  const cityOk = x => !sel.citySel.length || sel.citySel.includes(x.city);
   const evMatch = ev =>
     (!sel.typeSel.length || sel.typeSel.includes(ev.etype || 'Другое')) &&
-    whoMatch(ev, sel.whoSel) && textMatch(ev);
+    cityOk(ev) && whoMatch(ev, sel.whoSel) && textMatch(ev);
   const ptMatch = pt =>
     (!sel.typeSel.length || sel.typeSel.includes(pt.ptype || 'Другое')) &&
-    whoMatch(pt, sel.whoSel) && textMatch(pt);
+    cityOk(pt) && whoMatch(pt, sel.whoSel) && textMatch(pt);
   const typeOptions = [...new Set(
     allEvents.map(x => x.etype || 'Другое').concat(allPoints.map(x => x.ptype || 'Другое'))
   )].sort();
@@ -2826,10 +2900,11 @@ async function S_places() {
   const el = screen('', html);
   const flBtn = el.querySelector('#fl-open');
   const flLabel = () => {
-    el.querySelector('#fl-n').textContent = sel.whoSel.length || '';
-    flBtn.classList.toggle('on', !!sel.whoSel.length);
-    el.querySelector('#et-label').textContent = etText(sel);
-    el.querySelector('#et-open').classList.toggle('on', !!sel.typeSel.length);
+    const nf = sel.typeSel.length + sel.whoSel.length;
+    el.querySelector('#fl-n').textContent = nf || '';
+    flBtn.classList.toggle('on', !!nf);
+    el.querySelector('#ct-label').textContent = ctText(sel);
+    el.querySelector('#ct-open').classList.toggle('on', !!sel.citySel.length);
   };
   flLabel();
   const qInp = el.querySelector('#pl-q');
@@ -2862,11 +2937,8 @@ async function S_places() {
     count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
     onClose: applyAll,
   });
-  el.querySelector('#et-open').onclick = () => openFilterSheet({
-    types: typeOptions, people: [], sel, typesOnly: true,
-    count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
-    onClose: applyAll,
-  });
+  el.querySelector('#ct-open').onclick = () =>
+    openCityPick(meta.cities || [], sel, applyAll);
   el.querySelector('#map-open').onclick = () =>
     push(S_map, { events: allEvents, points: allPoints, meta: meta });
   el.querySelector('#ai-open').onclick = () => push(S_aiChat);
@@ -2888,6 +2960,7 @@ async function S_places() {
     const ub = e.target.closest('[data-unbook]');
     if (ub) {
       if (!(await confirmDlg('Снять бронь (' + ub.dataset.bkinfo + ')?'))) return;
+      ub.classList.add('pulse', 'busy'); // отклик сразу, пока летит запрос
       try {
         await api('/api/bookings/' + ub.dataset.unbook, 'DELETE');
         toast('Бронь снята ✓', true);
@@ -2895,11 +2968,12 @@ async function S_places() {
         allEvents = d.events;
         allPoints = d.points;
         applyAll();
-      } catch (err) { toast(err.message); }
+      } catch (err) { toast(err.message); ub.classList.remove('busy'); }
       return;
     }
     const eb = e.target.closest('[data-ebook]');
     if (eb) {
+      eb.classList.add('pulse', 'busy'); // отклик сразу, пока летит запрос
       // бронь мероприятия в один тап — на выбранную в календаре дату
       const ev = allEvents.find(x => x.id === +eb.dataset.ebook);
       const evTo = ev.date_to || ev.date_from;
@@ -2914,7 +2988,7 @@ async function S_places() {
         allEvents = d.events;
         allPoints = d.points;
         applyAll();
-      } catch (err) { toast(err.message); }
+      } catch (err) { toast(err.message); eb.classList.remove('busy'); }
       return;
     }
     const bk = e.target.closest('[data-book]');
@@ -2926,6 +3000,7 @@ async function S_places() {
     const go = e.target.closest('[data-bkgo]');
     if (go) {
       const f = el.querySelector('[data-bkform="' + go.dataset.bkgo + '"]');
+      go.classList.add('pulse', 'busy'); // отклик сразу, пока летит запрос
       try {
         await api('/api/bookings', 'POST', {
           kind: 'point', ref_id: +go.dataset.bkgo, user_id: ME.id,
@@ -2937,7 +3012,7 @@ async function S_places() {
         allEvents = d.events;
         allPoints = d.points;
         applyAll();
-      } catch (err) { toast(err.message); }
+      } catch (err) { toast(err.message); go.classList.remove('busy'); }
       return;
     }
     if (e.target.closest('.bkform')) return;
@@ -3308,8 +3383,10 @@ async function S_prices() {
     '<div class="card hint small">Меняй цену прямо в окошке — рядом появится кнопка ✓ ' +
     'для сохранения.</div>' +
     '<div class="field"><input id="pz-q" placeholder="🔍 Поиск товара…"></div>' +
-    '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>';
+    '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>' +
+    '<div id="hist"></div>';
   const el = screen('Управление ценами', html, true);
+  histBlock(el, 'price_change');
   el.querySelector('#pz-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(r => {
@@ -3394,18 +3471,71 @@ async function S_products() {
 // порядок групп: стрелками вверх/вниз, применяется во всех списках товаров
 async function S_groupOrder() {
   let groups = (await api('/api/groups')).groups.map(g => g.name);
+  let renaming = -1; // индекс папки, у которой открыто поле переименования
   const rowsHtml = () => groups.map((g, i) =>
-    '<div class="row"><div class="l name small">' + esc(g) + '</div>' +
-    '<div class="r" style="display:flex;gap:6px">' +
-    '<button class="chip" data-up="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
-    '<button class="chip" data-dn="' + i + '"' + (i === groups.length - 1 ? ' disabled' : '') +
-    '>↓</button></div></div>').join('');
+    renaming === i
+      ? '<div class="row"><div class="l" style="flex:1;padding-right:8px">' +
+        '<input id="go-ren" value="' + esc(g) + '" style="padding:8px 10px"></div>' +
+        '<div class="r" style="display:flex;gap:6px">' +
+        '<button class="chip" data-renok="' + i + '">✓</button>' +
+        '<button class="chip" data-rencancel="1">✕</button></div></div>'
+      : '<div class="row"><div class="l name small">' + esc(g) + '</div>' +
+        '<div class="r" style="display:flex;gap:6px">' +
+        '<button class="chip" data-up="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+        '<button class="chip" data-dn="' + i + '"' +
+        (i === groups.length - 1 ? ' disabled' : '') + '>↓</button>' +
+        '<button class="chip" data-ren="' + i + '">✏️</button>' +
+        '<button class="chip" data-del="' + i + '">🗑</button></div></div>').join('');
   const html =
     '<div class="card hint small">Стрелками задай порядок — он применится во всех списках ' +
-    'товаров: склад, номенклатура, цены, ведомости.</div>' +
-    '<div class="card" id="go-list">' + rowsHtml() + '</div>';
-  const el = screen('Порядок групп', html, true);
+    'товаров. ✏️ — переименовать, 🗑 — удалить (товары останутся без папки).</div>' +
+    '<div class="card" id="go-list">' + rowsHtml() + '</div>' +
+    '<div class="card"><div class="field" style="margin-bottom:8px">' +
+    '<label>Новая папка</label><input id="go-new" placeholder="Например, Пастила"></div>' +
+    '<button class="btn secondary" id="go-add" style="margin:0">+ Создать папку</button></div>';
+  const el = screen('Папки товаров', html, true);
+  const redraw = () => { el.querySelector('#go-list').innerHTML = rowsHtml(); };
+  const reload = rr => { groups = rr.groups.map(g => g.name); renaming = -1; redraw(); };
+  el.querySelector('#go-add').onclick = async () => {
+    const name = el.querySelector('#go-new').value.trim();
+    if (!name) { toast('Введи название папки'); return; }
+    if (!(await confirmDlg('Создать папку «' + name + '»?'))) return;
+    try {
+      reload(await api('/api/groups', 'POST', { name }));
+      el.querySelector('#go-new').value = '';
+      PRODUCTS_CACHE = null;
+      toast('Папка создана ✓', true);
+    } catch (err) { toast(err.message); }
+  };
   el.addEventListener('click', async e => {
+    const ren = e.target.closest('[data-ren]');
+    if (ren) { renaming = +ren.dataset.ren; redraw(); el.querySelector('#go-ren').focus(); return; }
+    if (e.target.closest('[data-rencancel]')) { renaming = -1; redraw(); return; }
+    const ok = e.target.closest('[data-renok]');
+    if (ok) {
+      const i = +ok.dataset.renok;
+      const nv = el.querySelector('#go-ren').value.trim();
+      if (!nv || nv === groups[i]) { renaming = -1; redraw(); return; }
+      if (!(await confirmDlg('Переименовать папку «' + groups[i] + '» в «' + nv + '»?'))) return;
+      try {
+        reload(await api('/api/groups/rename', 'POST', { old: groups[i], new: nv }));
+        PRODUCTS_CACHE = null;
+        toast('Переименована ✓', true);
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      const i = +del.dataset.del;
+      if (!(await confirmDlg('Удалить папку «' + groups[i] +
+        '»? Товары не удалятся — останутся без папки.'))) return;
+      try {
+        reload(await api('/api/groups/delete', 'POST', { name: groups[i] }));
+        PRODUCTS_CACHE = null;
+        toast('Папка удалена ✓', true);
+      } catch (err) { toast(err.message); }
+      return;
+    }
     const up = e.target.closest('[data-up]');
     const dn = e.target.closest('[data-dn]');
     if (!up && !dn) return;
@@ -3413,7 +3543,7 @@ async function S_groupOrder() {
     const j = up ? i - 1 : i + 1;
     if (j < 0 || j >= groups.length) return;
     [groups[i], groups[j]] = [groups[j], groups[i]];
-    el.querySelector('#go-list').innerHTML = rowsHtml();
+    redraw();
     try {
       await api('/api/groups/order', 'PUT', { names: groups });
       PRODUCTS_CACHE = null;
@@ -3540,7 +3670,10 @@ async function S_expenses() {
     '<div class="card">' +
     (r.expenses.length ? r.expenses.map(x =>
       '<div class="row"><div class="l"><div class="name small">' + esc(x.category) + '</div>' +
-      '<div class="sub">' + dstr(x.date) + (x.comment ? ' • ' + esc(x.comment) : '') + '</div></div>' +
+      '<div class="sub">' + dstr(x.date) +
+      (tstr(x.ts) ? ' <span style="opacity:.65">' + tstr(x.ts) + '</span>' : '') +
+      ' • внёс(ла): ' + esc(x.creator_name || '—') +
+      (x.comment ? ' • ' + esc(x.comment) : '') + '</div></div>' +
       '<div class="r"><span class="val">' + fmtM(x.amount) + '</span> ' +
       '<button class="chip" data-del="' + x.id + '">✕</button></div></div>').join('')
       : '<div class="hint">Расходов за период нет</div>') + '</div>';

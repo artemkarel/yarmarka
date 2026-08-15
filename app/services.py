@@ -288,6 +288,43 @@ def groups_set_order(conn, names):
     return groups_list(conn)
 
 
+def groups_create(conn, name):
+    name = _norm_group(name)
+    if not name:
+        raise ValueError("Укажите название папки")
+    if conn.execute("SELECT 1 FROM product_groups WHERE name=?", (name,)).fetchone():
+        raise ValueError("Такая папка уже есть")
+    with _lock, conn:
+        _ensure_group(conn, name)
+    return groups_list(conn)
+
+
+def groups_rename(conn, old, new):
+    new = _norm_group(new)
+    if not new:
+        raise ValueError("Укажите новое название")
+    if conn.execute("SELECT 1 FROM product_groups WHERE name=?", (old,)).fetchone() is None:
+        raise ValueError("Папка не найдена")
+    with _lock, conn:
+        if conn.execute("SELECT 1 FROM product_groups WHERE name=?", (new,)).fetchone():
+            # такая папка уже есть — сливаем в неё
+            conn.execute("DELETE FROM product_groups WHERE name=?", (old,))
+        else:
+            conn.execute("UPDATE product_groups SET name=? WHERE name=?", (new, old))
+        conn.execute("UPDATE products SET group_name=? WHERE group_name=?", (new, old))
+    return groups_list(conn)
+
+
+def groups_delete(conn, name):
+    """Товары папки не удаляются — остаются «без папки»."""
+    if conn.execute("SELECT 1 FROM product_groups WHERE name=?", (name,)).fetchone() is None:
+        raise ValueError("Папка не найдена")
+    with _lock, conn:
+        conn.execute("UPDATE products SET group_name='' WHERE group_name=?", (name,))
+        conn.execute("DELETE FROM product_groups WHERE name=?", (name,))
+    return groups_list(conn)
+
+
 def products_list(conn, include_archived=False):
     q = ("SELECT p.*, COALESCE(s.qty, 0) AS stock_qty FROM products p "
          "LEFT JOIN stock s ON s.product_id = p.id "
