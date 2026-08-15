@@ -175,9 +175,17 @@ def api_product_create(request: Request, payload: dict = Body(...)):
 def api_product_update(pid: int, request: Request, payload: dict = Body(...)):
     u = current_user(request)
     need_staff(u)
+    conn = db.get()
     fields = {k: payload[k] for k in ("name", "unit", "purchase_price", "retail_price",
                                       "archived", "group_name") if k in payload}
-    return {"product": services.product_update(db.get(), pid, **fields)}
+    old = services.products_list(conn, include_archived=True)
+    old_price = next((p["retail_price"] for p in old if p["id"] == pid), None)
+    product = services.product_update(conn, pid, **fields)
+    # смена цены продажи фиксируется журнальным документом
+    if ("retail_price" in fields and old_price is not None
+            and abs(product["retail_price"] - old_price) > 0.004):
+        services.doc_price_change(conn, u, [{"product_id": pid, "old": old_price}])
+    return {"product": product}
 
 
 @app.delete("/api/products/{pid}")
@@ -315,9 +323,10 @@ def api_vydacha(request: Request, payload: dict = Body(...)):
     st = services.settings_get(conn)
     doc = _with_print(services.doc_vydacha(
         conn, u, payload.get("seller_id"), doc_date(payload, u),
-        payload.get("lines"), st["share_pct"], payload.get("comment")))
+        payload.get("lines"), st["share_pct"], payload.get("comment"),
+        post=not payload.get("draft")))
     seller = services.user_by_id(conn, doc["seller_id"])
-    if seller:
+    if seller and doc["status"] == "posted":
         lines_txt = "\n".join(
             f"{i + 1}. {ln['name']} — {_fq(ln['qty'])} {ln['unit']} × "
             f"{_fm(ln['retail_price'])} = {_fm(ln['qty'] * ln['retail_price'])}"
@@ -338,9 +347,10 @@ def api_sdacha(request: Request, payload: dict = Body(...)):
     conn = db.get()
     st = services.settings_get(conn)
     doc = services.doc_sdacha(conn, u, payload.get("seller_id"), doc_date(payload, u),
-                              payload.get("lines"), st["share_pct"], payload.get("comment"))
+                              payload.get("lines"), st["share_pct"], payload.get("comment"),
+                              post=not payload.get("draft"))
     seller = services.user_by_id(conn, doc["seller_id"])
-    if seller:
+    if seller and doc["status"] == "posted":
         b = services.seller_balance(conn, doc["seller_id"])
         wh_val = sum(ln["qty_to_wh"] * ln["retail_price"] for ln in doc["lines"])
         shelf_val = sum(ln["qty_to_shelf"] * ln["retail_price"] for ln in doc["lines"])
@@ -404,6 +414,62 @@ def api_doc_delete(doc_id: int, request: Request):
     if doc["type"] == "cash":
         need_owner(u)
     return services.doc_delete(db.get(), u, doc_id)
+
+
+@app.post("/api/docs/{doc_id}/post")
+def api_doc_post(doc_id: int, request: Request):
+    u = current_user(request)
+    need_staff(u)
+    conn = db.get()
+    if services.doc_get(conn, doc_id)["type"] == "cash":
+        need_owner(u)
+    return {"doc": _with_print(services.post_doc(conn, u, doc_id))}
+
+
+@app.post("/api/docs/{doc_id}/void")
+def api_doc_void(doc_id: int, request: Request):
+    u = current_user(request)
+    need_staff(u)
+    conn = db.get()
+    if services.doc_get(conn, doc_id)["type"] == "cash":
+        need_owner(u)
+    return {"doc": services.void_doc(conn, u, doc_id)}
+
+
+@app.put("/api/docs/{doc_id}/lines")
+def api_doc_lines(doc_id: int, request: Request, payload: dict = Body(...)):
+    """Подсчёт по инвентаризационной ведомости (черновику)."""
+    u = current_user(request)
+    need_staff(u)
+    return {"doc": services.inventory_set_lines(db.get(), u, doc_id, payload.get("lines"))}
+
+
+@app.post("/api/docs/transfer")
+def api_transfer(request: Request, payload: dict = Body(...)):
+    u = current_user(request)
+    need_staff(u)
+    conn = db.get()
+    st = services.settings_get(conn)
+    doc = services.doc_transfer(conn, u, payload.get("from_seller_id"),
+                                payload.get("to_seller_id"), doc_date(payload, u),
+                                payload.get("lines"), st["share_pct"],
+                                payload.get("comment"))
+    frm = services.user_by_id(conn, doc["seller_id"])
+    to_doc = next((c for c in doc["chain"] if c["rel"] == "child"), None)
+    if frm:
+        bot.send_sync(frm["tg_id"], f"📤 Передача товара: с тебя снято товара на "
+                                    f"{_fm(doc['amount'])} и долг {_fm(-doc['money'])}.")
+    if to_doc:
+        to_full = services.doc_get(conn, to_doc["id"])
+        to_user = services.user_by_id(conn, to_full["seller_id"])
+        if to_user:
+            lines_txt = "\n".join(
+                f"{i + 1}. {ln['name']} — {_fq(ln['qty'])} {ln['unit']}"
+                for i, ln in enumerate(to_full["lines"]))
+            bot.send_sync(to_user["tg_id"],
+                          f"📥 Тебе передан товар ({_date_ru(doc['date'])}):\n{lines_txt}\n"
+                          f"На сумму {_fm(doc['amount'])}, долг за товар +{_fm(-doc['money'])}.")
+    return {"doc": doc}
 
 
 @app.get("/print/{doc_id}/{sig}", response_class=HTMLResponse)

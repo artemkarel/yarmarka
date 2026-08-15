@@ -147,3 +147,47 @@ def _migrate(conn):
         conn.execute("ALTER TABLE points ADD COLUMN phone TEXT")
     if "email" not in cols:
         conn.execute("ALTER TABLE points ADD COLUMN email TEXT")
+
+    dcols = {r["name"] for r in conn.execute("PRAGMA table_info(docs)")}
+    if "status" not in dcols:
+        # статусы документов: draft (черновик, остатки не трогает) | posted | void (сторно)
+        conn.execute("ALTER TABLE docs ADD COLUMN status TEXT NOT NULL DEFAULT 'posted'")
+    if "parent_id" not in dcols:
+        conn.execute("ALTER TABLE docs ADD COLUMN parent_id INTEGER")
+
+    scols = {r["name"] for r in conn.execute("PRAGMA table_info(seller_stock)")}
+    if "avg_cost" not in scols:
+        conn.execute("ALTER TABLE seller_stock ADD COLUMN avg_cost REAL NOT NULL DEFAULT 0")
+
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS lots(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL,
+      qty_left REAL NOT NULL,
+      unit_cost REAL NOT NULL,
+      src_doc_id INTEGER,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_lots_product ON lots(product_id, id);
+    CREATE TABLE IF NOT EXISTS lot_moves(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id INTEGER NOT NULL,
+      lot_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      qty REAL NOT NULL,
+      unit_cost REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_lotmoves_doc ON lot_moves(doc_id);
+    """)
+    # FIFO-старт для баз, живших без партий: остатки склада превращаем в стартовые партии
+    has_lots = conn.execute("SELECT 1 FROM lots LIMIT 1").fetchone()
+    if not has_lots:
+        for r in conn.execute(
+            "SELECT s.product_id, s.qty, p.purchase_price FROM stock s "
+            "JOIN products p ON p.id = s.product_id WHERE s.qty > 0.001"
+        ).fetchall():
+            conn.execute(
+                "INSERT INTO lots(product_id, qty_left, unit_cost, src_doc_id, created_at) "
+                "VALUES(?,?,?,NULL, datetime('now'))",
+                (r["product_id"], r["qty"], r["purchase_price"]),
+            )

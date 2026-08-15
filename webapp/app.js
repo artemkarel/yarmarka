@@ -91,8 +91,13 @@ function render() {
 let RESTORE_Y = null; // прокрутка, которую надо вернуть после «назад»
 
 function push(fn) {
-  // запоминаем, где стоял пользователь, чтобы вернуть его на то же место
-  if (stack.length) stack[stack.length - 1].scrollY = window.scrollY || 0;
+  // запоминаем, где стоял пользователь и как выглядел экран,
+  // чтобы вернуть на то же место и показывать его под свайпом «назад»
+  if (stack.length) {
+    const sc = document.getElementById('screen');
+    stack[stack.length - 1].scrollY = window.scrollY || 0;
+    stack[stack.length - 1].html = sc ? sc.innerHTML : '';
+  }
   stack.push({ fn, args: Array.prototype.slice.call(arguments, 1) });
   ANIM = 'push';
   render();
@@ -164,10 +169,37 @@ function screen(title, html, sub) {
   return el;
 }
 
-// свайп слева направо — назад: экран (вместе с шапкой) едет за пальцем
+// свайп слева направо — назад: экран (вместе с шапкой) едет за пальцем,
+// а под ним проглядывает предыдущий экран
 (function () {
   const sc = () => document.getElementById('screen');
   let t0 = null;
+  let under = null;
+
+  function makeUnder() {
+    const prev = stack[stack.length - 2];
+    if (!prev || !prev.html) return;
+    const el = sc();
+    under = document.createElement('div');
+    under.id = 'screen-under';
+    under.style.cssText = 'position:absolute; left:' + el.offsetLeft + 'px; width:' +
+      el.offsetWidth + 'px; top:' + el.offsetTop + 'px; bottom:0; overflow:hidden; ' +
+      'z-index:0; pointer-events:none; opacity:.9; transform:translateX(-24%);';
+    under.innerHTML = '<div style="transform:translateY(-' + (prev.scrollY || 0) + 'px)">' +
+      prev.html + '</div>';
+    el.parentElement.insertBefore(under, el);
+    el.classList.add('dragging');
+  }
+
+  function dropUnder(delay) {
+    const u = under;
+    under = null;
+    setTimeout(() => {
+      if (u) u.remove();
+      const el = sc();
+      if (el) el.classList.remove('dragging');
+    }, delay || 0);
+  }
 
   function finish(dxRaw) {
     const el = sc();
@@ -180,19 +212,30 @@ function screen(title, html, sub) {
       backBusy = true;
       el.style.transition = 'transform .16s ease';
       el.style.transform = 'translateX(100%)';
+      if (under) {
+        under.style.transition = 'transform .16s ease, opacity .16s ease';
+        under.style.transform = 'translateX(0)';
+        under.style.opacity = '1';
+      }
       setTimeout(() => {
         el.style.transition = '';
         el.style.transform = '';
         stack.pop();
         RESTORE_Y = stack[stack.length - 1].scrollY || 0;
-        ANIM = 'backin';
+        ANIM = null; // подложка уже показала предыдущий экран — без второй анимации
         render();
+        dropUnder(40);
         backBusy = false;
         if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
       }, 150);
     } else {
       el.style.transition = 'transform .18s ease';
       el.style.transform = 'translateX(0)';
+      if (under) {
+        under.style.transition = 'transform .18s ease';
+        under.style.transform = 'translateX(-24%)';
+      }
+      dropUnder(200);
       setTimeout(() => { el.style.transition = ''; el.style.transform = ''; }, 200);
     }
   }
@@ -223,8 +266,14 @@ function screen(title, html, sub) {
     }
     if (e.cancelable) e.preventDefault(); // жест наш — не отдаём его прокрутке
     const el = sc();
+    if (!under && t0.drag) makeUnder();
     el.style.transition = 'none';
     el.style.transform = 'translateX(' + Math.max(0, dx) + 'px)';
+    if (under) {
+      const prog = Math.min(1, Math.max(0, dx / el.offsetWidth));
+      under.style.transform = 'translateX(' + (-24 + 24 * prog) + '%)';
+      under.style.opacity = String(0.85 + 0.15 * prog);
+    }
     t0.dx = dx;
   }, { passive: false });
 
@@ -242,24 +291,38 @@ function screen(title, html, sub) {
   }, { passive: true });
 })();
 
+
+// строгие иконки нижнего меню (SVG, цвет наследуется)
+const NAV_ICONS = {
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg>',
+  box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5Z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>',
+  people: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 20c.8-3.2 3.4-5 6.5-5s5.7 1.8 6.5 5"/><circle cx="17" cy="9" r="2.6"/><path d="M16 15.2c2.6.2 4.6 1.8 5.3 4.3"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-5.8-7-11a7 7 0 0 1 14 0c0 5.2-7 11-7 11Z"/><circle cx="12" cy="10" r="2.6"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></svg>',
+  menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>',
+};
+
 function buildNav() {
   const ownerish = ME.role === 'admin' || ME.role === 'owner';
   let items;
   if (ME.role === 'seller') {
-    items = [['🏠', 'Главная', S_home], ['📦', 'Склад', S_skladView],
-             ['📍', 'Точки', S_places], ['📊', 'Аналитика', S_turnover],
-             ['⋯', 'Ещё', S_more]];
+    items = [['home', 'Главная', S_home], ['box', 'Склад', S_skladView],
+             ['pin', 'Точки', S_places], ['chart', 'Аналитика', S_turnover],
+             ['menu', 'Ещё', S_more]];
   } else if (ME.role === 'keeper') {
-    items = [['📦', 'Склад', S_sklad], ['🤝', 'Реализация', S_sellers],
-             ['📊', 'Аналитика', S_analytics], ['⋯', 'Ещё', S_more]];
+    items = [['box', 'Склад', S_sklad], ['people', 'Реализация', S_sellers],
+             ['chart', 'Аналитика', S_analytics], ['menu', 'Ещё', S_more]];
   } else {
-    items = [['📦', 'Склад', S_sklad], ['🤝', 'Реализация', S_sellers], ['📍', 'Точки', S_places],
-             ['📊', 'Аналитика', S_analytics], ['⋯', 'Ещё', S_more]];
+    items = [['box', 'Склад', S_sklad], ['people', 'Реализация', S_sellers],
+             ['pin', 'Точки', S_places], ['chart', 'Аналитика', S_analytics],
+             ['menu', 'Ещё', S_more]];
   }
   const nav = document.getElementById('nav');
-  nav.innerHTML = '<div class="ind" style="width:' + (100 / items.length) + '%"></div>' +
+  nav.innerHTML = '<div class="ind" style="width:calc((100% - 8px)/' + items.length +
+    ')"></div>' +
     items.map(it =>
-      '<button><span class="ico">' + it[0] + '</span>' + it[1] + '</button>').join('');
+      '<button><span class="ico">' + (NAV_ICONS[it[0]] || '') + '</span>' + it[1] +
+      '</button>').join('');
   nav.hidden = false;
   nav.querySelectorAll('button').forEach((b, i) => {
     b.onclick = () => setTab(items[i][2], i);
@@ -313,9 +376,17 @@ function stockListHtml(items, title) {
 
 const DOC_META = {
   prihod: ['📥', 'Поступление'], initial: ['📋', 'Нач. остатки'],
-  inventory: ['🔍', 'Инвентаризация'], vydacha: ['🚚', 'Выдача'], sdacha: ['📤', 'Сдача'],
-  incass: ['💳', 'Инкассация'], cash: ['💵', 'Наличные'],
+  inventory: ['🔍', 'Инвентаризация'], vydacha: ['🚚', 'Выдача'], sdacha: ['↩️', 'Приём товара'],
+  incass: ['💳', 'Инкассация'], cash: ['💵', 'Наличные'], writeoff: ['📉', 'Списание'],
+  surplus: ['📈', 'Оприходование'], price_change: ['🏷', 'Смена цен'],
+  transfer_out: ['📤', 'Передача (отдал)'], transfer_in: ['📥', 'Передача (принял)'],
 };
+
+function statusBadge(d) {
+  if (d.status === 'draft') return ' <span class="badge draft">Черновик</span>';
+  if (d.status === 'void') return ' <span class="badge void">Отменён</span>';
+  return ' <span class="badge posted">✓ проведён</span>';
+}
 
 // единый стиль меню: карточка со строками «иконка название ›»
 function menuTiles(items) {
@@ -332,7 +403,7 @@ function bindMenu(el, handlers) {
   });
 }
 
-function docCard(d, showSeller, canDelete) {
+function docCard(d, showSeller, canManage) {
   const meta = DOC_META[d.type] || ['📄', d.type];
   let sum = '';
   if (d.type === 'prihod') sum = 'на ' + fmtM(d.amount) + ' по ценам продажи' +
@@ -344,13 +415,33 @@ function docCard(d, showSeller, canDelete) {
     ? 'получено ' + fmtM(d.amount) : 'выдано продавцу ' + fmtM(-d.amount);
   else if (d.type === 'inventory') sum = 'результат ' + fmtM(d.amount) + ' по себестоимости';
   else if (d.type === 'initial') sum = 'введены остатки';
+  else if (d.type === 'writeoff') sum = 'недостача ' + fmtM(d.amount);
+  else if (d.type === 'surplus') sum = 'излишки ' + fmtM(d.amount);
+  else if (d.type === 'price_change') sum = 'обновлены цены продажи';
+  else if (d.type === 'transfer_out' || d.type === 'transfer_in') {
+    sum = 'товара на ' + fmtM(d.amount) + ' • долг ' +
+      (d.money >= 0 ? '+' : '−') + fmtM(Math.abs(d.money));
+  }
   const who = (showSeller && d.seller_name) ? esc(d.seller_name) + ' • ' : '';
-  return '<details class="doc" ontoggle="onDocToggle(event,' + d.id + ')">' +
-    '<summary><div class="dochead"><div><b>' + meta[0] + ' ' + meta[1] + '</b></div>' +
-    '<div class="dt">' + dstr(d.date) +
-    (canDelete ? ' <button class="chip" style="padding:4px 9px" data-docdel="' + d.id +
-      '" data-docname="' + meta[1] + ' от ' + dstr(d.date) + '">🗑</button>' : '') +
-    '</div></div>' +
+  const docName = meta[1] + ' от ' + dstr(d.date);
+  let controls = '';
+  if (canManage) {
+    if (d.status === 'draft') {
+      controls =
+        ' <button class="chip" style="padding:4px 9px" data-docpost="' + d.id +
+        '" data-docname="' + docName + '">▶️</button>' +
+        ' <button class="chip" style="padding:4px 9px" data-docdel="' + d.id +
+        '" data-docname="' + docName + '">🗑</button>';
+    } else if (d.status === 'posted' && d.type !== 'price_change') {
+      controls = ' <button class="chip" style="padding:4px 9px" data-docvoid="' + d.id +
+        '" data-docname="' + docName + '">↩️</button>';
+    }
+  }
+  return '<details class="doc' + (d.status === 'void' ? ' voided' : '') +
+    '" ontoggle="onDocToggle(event,' + d.id + ')">' +
+    '<summary><div class="dochead"><div><b>' + meta[0] + ' ' + meta[1] + '</b>' +
+    statusBadge(d) + '</div>' +
+    '<div class="dt">' + dstr(d.date) + controls + '</div></div>' +
     '<div class="sub hint small">' + who + sum +
     (d.comment ? ' • ' + esc(d.comment) : '') + '</div></summary>' +
     '<div class="doclines hint small">Загрузка…</div></details>';
@@ -390,9 +481,26 @@ function docLinesHtml(doc) {
       if (l.qty_to_wh > 0) parts.push('на склад ' + fmtQ(l.qty_to_wh, l.unit));
       if (l.qty_to_shelf > 0) parts.push('на полку ' + fmtQ(l.qty_to_shelf, l.unit));
       txt = esc(l.name) + ': ' + parts.join(', ');
+    } else if (doc.type === 'price_change') {
+      txt = esc(l.name) + ': ' + fmtM(l.purchase_price) + ' → <b>' +
+        fmtM(l.retail_price) + '</b>';
+    } else if (doc.type === 'transfer_out' || doc.type === 'transfer_in') {
+      txt = esc(l.name) + ' — ' + fmtQ(l.qty, l.unit);
+    } else if (doc.type === 'writeoff' || doc.type === 'surplus') {
+      txt = esc(l.name) + ' — ' + fmtQ(l.qty, l.unit) + ' × ' + fmtM(l.purchase_price) +
+        ' = ' + fmtM(l.qty * l.purchase_price);
     }
     return '<div class="row small">' + txt + '</div>';
   }).join('') +
+  ((doc.chain || []).length
+    ? '<div style="padding:8px 0 2px" class="hint small"><b>🔗 Цепочка документов:</b></div>' +
+      doc.chain.map(c => {
+        const m = DOC_META[c.type] || ['📄', c.type];
+        return '<button class="chip" style="margin:2px 4px 2px 0" data-chainopen="' + c.id +
+          '">' + (c.rel === 'parent' ? '⬆️ ' : '⬇️ ') + m[1] + ' от ' + dstr(c.date) +
+          (c.status === 'void' ? ' (отменён)' : '') + '</button>';
+      }).join('')
+    : '') +
   (doc.type === 'inventory'
     ? '<div style="padding:8px 0"><button class="chip" onclick="openInvReport(' + doc.id +
       ')">📑 Отчёт о расхождениях</button></div>' : '') +
@@ -411,8 +519,22 @@ function openExternal(url) {
 
 document.addEventListener('click', e => {
   const pr = e.target.closest('[data-print]');
-  if (pr) { e.preventDefault(); openExternal(pr.dataset.print); }
+  if (pr) { e.preventDefault(); openExternal(pr.dataset.print); return; }
+  const ch = e.target.closest('[data-chainopen]');
+  if (ch) { e.preventDefault(); push(S_docView, +ch.dataset.chainopen); }
 });
+
+// просмотр одного документа (по клику из цепочки)
+async function S_docView(id) {
+  const d = (await api('/api/docs/' + id)).doc;
+  const meta = DOC_META[d.type] || ['📄', d.type];
+  const html = '<div class="card">' +
+    '<div class="dochead"><div><b>' + meta[0] + ' ' + meta[1] + '</b>' + statusBadge(d) +
+    '</div><div class="dt">' + dstr(d.date) + '</div></div>' +
+    (d.seller_name ? '<div class="sub hint small">' + esc(d.seller_name) + '</div>' : '') +
+    '<div style="margin-top:8px">' + docLinesHtml(d) + '</div></div>';
+  screen(meta[1], html, true);
+}
 
 // живой поиск товара: печатаешь название — снизу предлагаются позиции
 function attachProductSearch(el, products, opts) {
@@ -640,16 +762,16 @@ async function S_sklad() {
       '</div></details>').join('') + '</div>'
     : '';
   const html =
+    '<div class="tiles">' +
+    '<div class="tile"><div class="tl">Всего кг</div><div class="tv">' + NF3.format(t.kg) + '</div></div>' +
+    '<div class="tile"><div class="tl">Себестоимость</div><div class="tv">' + fmtM(t.purchase_value) + '</div></div>' +
+    '<div class="tile"><div class="tl">Сумма продаж</div><div class="tv">' + fmtM(t.retail_value) + '</div></div>' +
+    '</div>' +
     menuTiles([
       ['prihod', '📥', 'Поступление товара', true],
       ['inv', '🔍', 'Инвентаризация'],
       ['init', '📋', 'Начальные остатки'],
     ]) +
-    '<div class="tiles">' +
-    '<div class="tile"><div class="tl">Всего кг</div><div class="tv">' + NF3.format(t.kg) + '</div></div>' +
-    '<div class="tile"><div class="tl">Себестоимость</div><div class="tv">' + fmtM(t.purchase_value) + '</div></div>' +
-    '<div class="tile"><div class="tl">Сумма продажи</div><div class="tv">' + fmtM(t.retail_value) + '</div></div>' +
-    '</div>' +
     '<div class="field"><input id="sk-q" placeholder="🔍 Поиск по остаткам…"></div>' +
     '<div class="card"><h3>Остатки на складе</h3>' +
     (rows || '<div class="hint small">Склад пуст. Добавь поступление или начальные остатки.</div>') +
@@ -657,7 +779,7 @@ async function S_sklad() {
   const el = screen('', html);
   bindMenu(el, {
     prihod: () => push(S_prihod),
-    inv: () => push(S_countSheet, 'inventory'),
+    inv: () => push(S_invStart),
     init: () => push(S_countSheet, 'initial'),
   });
   el.querySelector('#sk-q').addEventListener('input', e => {
@@ -711,7 +833,8 @@ async function S_prihod() {
     '<div id="pr-lines"></div>' +
     '<button class="chip" id="pr-more" hidden style="margin-bottom:10px">+ Добавить строку</button>' +
     '<div class="card" id="pr-total" hidden></div>' +
-    '<button class="btn" id="pr-save">Провести поступление</button>';
+    '<button class="btn" id="pr-save">Провести поступление</button>' +
+    '<button class="btn secondary" id="pr-draft">💾 Сохранить черновик</button>';
   const el = screen('Поступление товара', html, true);
   const linesEl = el.querySelector('#pr-lines');
 
@@ -767,7 +890,7 @@ async function S_prihod() {
     s.scrollIntoView({ block: 'center' });
     s.focus();
   };
-  el.querySelector('#pr-save').onclick = async () => {
+  const saveProc = async draft => {
     const out = lines.map(l => ({
       product_id: l.product.id, qty: pnum(l.qty), purchase_price: pnum(l.price),
     })).filter(l => l.qty > 0);
@@ -790,10 +913,93 @@ async function S_prihod() {
         date: el.querySelector('#pr-date').value,
         supplier_id: supplierId,
         lines: out,
+        draft: draft || undefined,
       });
-      toast('Поступление проведено ✓', true);
+      toast(draft ? 'Черновик сохранён — он в «Документах» ✓'
+        : 'Поступление проведено ✓', true);
       PRODUCTS_CACHE = null;
       back();
+    } catch (e) { toast(e.message); }
+  };
+  el.querySelector('#pr-save').onclick = () => saveProc(false);
+  el.querySelector('#pr-draft').onclick = () => saveProc(true);
+}
+
+// инвентаризация как процесс: Ведомость (черновик) → Подсчёт → Проведение,
+// при проведении система сама создаёт Списание (недостачи) и Оприходование (излишки)
+async function S_invStart() {
+  const r = await api('/api/docs?type=inventory&limit=50');
+  const draft = r.docs.find(d => d.status === 'draft');
+  if (draft) {
+    stack.pop();
+    push(S_invCount, draft.id);
+    return;
+  }
+  try {
+    const created = await api('/api/docs/inventory', 'POST', { lines: [] });
+    toast('Создана ведомость — вноси подсчёт', true);
+    stack.pop();
+    push(S_invCount, created.doc.id);
+  } catch (e) { toast(e.message); back(); }
+}
+
+async function S_invCount(docId) {
+  const [d, products] = await Promise.all([
+    api('/api/docs/' + docId), getProducts(true),
+  ]);
+  const facts = {};
+  d.doc.lines.forEach(l => { facts[l.product_id] = l.qty; });
+  const rows = products.filter(p => !p.archived).map((p, i) =>
+    '<div class="row prow" data-name="' + esc(p.name.toLowerCase()) + '">' +
+    '<div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' + esc(p.name) +
+    '</div><div class="sub">учёт: ' + fmtQ(p.stock_qty, p.unit) + '</div></div>' +
+    '<div class="r" style="width:104px"><input inputmode="decimal" class="fin" data-pid="' +
+    p.id + '" value="' + (facts[p.id] != null ? facts[p.id] : '') +
+    '" placeholder="факт"></div></div>').join('');
+  const html =
+    '<div class="card hint small">Ведомость №' + docId + ' (черновик). Считай в несколько ' +
+    'заходов: вноси факты и жми «Сохранить подсчёт». Остатки не меняются до проведения. ' +
+    'Пустые поля при проведении не трогаются.</div>' +
+    '<div class="field"><input id="ic-q" placeholder="🔍 Поиск товара…"></div>' +
+    '<div class="card">' + rows + '</div>' +
+    '<button class="btn secondary" id="ic-save">💾 Сохранить подсчёт</button>' +
+    '<button class="btn" id="ic-post">Провести ведомость</button>';
+  const el = screen('Инвентаризация', html, true);
+  el.querySelector('#ic-q').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase().trim();
+    el.querySelectorAll('.prow').forEach(row => {
+      row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
+    });
+  });
+  const collect = () => {
+    const lines = [];
+    el.querySelectorAll('.fin').forEach(inp => {
+      if (inp.value.trim() !== '') {
+        lines.push({ product_id: +inp.dataset.pid, qty: pnum(inp.value) });
+      }
+    });
+    return lines;
+  };
+  el.querySelector('#ic-save').onclick = async () => {
+    const lines = collect();
+    if (!lines.length) return toast('Внеси хотя бы один факт');
+    try {
+      await api('/api/docs/' + docId + '/lines', 'PUT', { lines });
+      toast('Подсчёт сохранён (' + lines.length + ' поз.) ✓', true);
+    } catch (e) { toast(e.message); }
+  };
+  el.querySelector('#ic-post').onclick = async () => {
+    const lines = collect();
+    if (!lines.length) return toast('Сначала внеси подсчёт');
+    if (!(await confirmDlg('Провести ведомость (' + lines.length + ' поз.)? Система создаст ' +
+      'списание недостач и оприходование излишков.'))) return;
+    try {
+      await api('/api/docs/' + docId + '/lines', 'PUT', { lines });
+      await api('/api/docs/' + docId + '/post', 'POST');
+      toast('Инвентаризация проведена ✓', true);
+      PRODUCTS_CACHE = null;
+      stack.pop();
+      push(S_invReport, docId);
     } catch (e) { toast(e.message); }
   };
 }
@@ -885,7 +1091,9 @@ async function S_seller(sid) {
     '<div class="btnrow">' +
     '<button class="btn" id="a-vyd">🚚 Выдать товар</button>' +
     '<button class="btn" id="a-sd">↩️ Принять товар</button></div>' +
+    '<div class="btnrow">' +
     '<button class="btn secondary" id="a-inc">💳 Внести инкассацию</button>' +
+    '<button class="btn secondary" id="a-move">🔁 Передать товар</button></div>' +
     settleBtn +
     stockListHtml(r.stock.hands, '🚚 На руках') +
     stockListHtml(r.stock.shelf, '🧺 На полке') +
@@ -896,6 +1104,7 @@ async function S_seller(sid) {
   el.querySelector('#a-vyd').onclick = () => push(S_vydacha, sid);
   el.querySelector('#a-sd').onclick = () => push(S_sdacha, sid);
   el.querySelector('#a-inc').onclick = () => push(S_incass, sid);
+  el.querySelector('#a-move').onclick = () => push(S_transfer, sid);
   const settle = el.querySelector('#a-settle');
   if (settle) settle.onclick = async () => {
     const msg = bal > 0
@@ -922,7 +1131,8 @@ async function S_vydacha(sid) {
     productSearchHtml('v-search', 'v-sug') +
     '<div id="v-lines"></div>' +
     '<div class="card" id="v-total" hidden></div>' +
-    '<button class="btn" id="v-save">Выдать товар</button>';
+    '<button class="btn" id="v-save">Выдать товар</button>' +
+    '<button class="btn secondary" id="v-draft">💾 Сохранить черновик</button>';
   const el = screen('Выдача: ' + info.seller.name, html, true);
   const linesEl = el.querySelector('#v-lines');
 
@@ -982,23 +1192,30 @@ async function S_vydacha(sid) {
       draw();
     },
   });
-  el.querySelector('#v-save').onclick = async () => {
+  const saveVyd = async draft => {
     const out = lines.map(l => ({
       product_id: l.product.id, qty_wh: pnum(l.qty_wh), qty_shelf: pnum(l.qty_shelf),
     })).filter(l => l.qty_wh > 0 || l.qty_shelf > 0);
     if (!out.length) return toast('Добавь позиции и количество');
     try {
       const r = await api('/api/docs/vydacha', 'POST',
-        { seller_id: sid, date: el.querySelector('#v-date').value, lines: out });
-      toast('Выдано на ' + fmtM(r.doc.amount) + ', долг +' + fmtM(r.doc.money), true);
+        { seller_id: sid, date: el.querySelector('#v-date').value, lines: out,
+          draft: draft || undefined });
       PRODUCTS_CACHE = null;
-      if (r.doc.print_url &&
-          await confirmDlg('Открыть УПД для печати или сохранения в PDF?')) {
-        openExternal(r.doc.print_url);
+      if (draft) {
+        toast('Черновик выдачи сохранён — он в «Документах» ✓', true);
+      } else {
+        toast('Выдано на ' + fmtM(r.doc.amount) + ', долг +' + fmtM(r.doc.money), true);
+        if (r.doc.print_url &&
+            await confirmDlg('Открыть УПД для печати или сохранения в PDF?')) {
+          openExternal(r.doc.print_url);
+        }
       }
       back();
     } catch (e) { toast(e.message); }
   };
+  el.querySelector('#v-save').onclick = () => saveVyd(false);
+  el.querySelector('#v-draft').onclick = () => saveVyd(true);
 }
 
 async function S_sdacha(sid) {
@@ -1079,6 +1296,61 @@ async function S_sdacha(sid) {
         { seller_id: sid, date: el.querySelector('#s-date').value, lines });
       toast('Сдача принята: продано на ' + fmtM(r.doc.amount), true);
       PRODUCTS_CACHE = null;
+      back();
+    } catch (e) { toast(e.message); }
+  };
+}
+
+// передача товара от одного сотрудника другому (делает кладовщик)
+async function S_transfer(fromSid) {
+  const [info, sellersResp] = await Promise.all([
+    api('/api/sellers/' + fromSid), api('/api/sellers'),
+  ]);
+  const hands = info.stock.hands;
+  const others = sellersResp.sellers.filter(s => s.id !== fromSid);
+  if (!hands.length) {
+    screen('Передача товара',
+      '<div class="card hint">У сотрудника нет товара на руках — передавать нечего.</div>',
+      true);
+    return;
+  }
+  if (!others.length) {
+    screen('Передача товара',
+      '<div class="card hint">Некому передавать — нет других продавцов.</div>', true);
+    return;
+  }
+  const rows = hands.map((h, i) =>
+    '<div class="row"><div class="l" style="flex:1"><div class="name small">' + (i + 1) +
+    '. ' + esc(h.name) + '</div><div class="sub">на руках ' + fmtQ(h.qty, h.unit) +
+    '</div></div>' +
+    '<div class="r" style="width:104px"><input inputmode="decimal" class="tr-q" data-pid="' +
+    h.product_id + '" data-max="' + h.qty + '" placeholder="сколько"></div></div>').join('');
+  const html =
+    '<div class="card hint small">Товар и долг за него переедут к получателю. ' +
+    'Оба получат уведомление в Telegram.</div>' +
+    '<div class="field"><label>Кому передать</label><select id="tr-to">' +
+    others.map(s => '<option value="' + s.id + '">' + esc(s.name) + '</option>').join('') +
+    '</select></div>' +
+    '<div class="card">' + rows + '</div>' +
+    '<button class="btn" id="tr-save">Передать</button>';
+  const el = screen('Передача: ' + info.seller.name, html, true);
+  el.querySelector('#tr-save').onclick = async () => {
+    const lines = [];
+    let bad = null;
+    el.querySelectorAll('.tr-q').forEach(inp => {
+      const q = pnum(inp.value);
+      if (q > parseFloat(inp.dataset.max) + 0.0005) bad = true;
+      if (q > 0) lines.push({ product_id: +inp.dataset.pid, qty: q });
+    });
+    if (bad) return toast('Нельзя передать больше, чем на руках');
+    if (!lines.length) return toast('Укажи количество хотя бы по одной позиции');
+    try {
+      const r = await api('/api/docs/transfer', 'POST', {
+        from_seller_id: fromSid,
+        to_seller_id: +el.querySelector('#tr-to').value,
+        lines,
+      });
+      toast('Передано на ' + fmtM(r.doc.amount) + ' ✓', true);
       back();
     } catch (e) { toast(e.message); }
   };
@@ -1244,12 +1516,20 @@ async function S_invReport(docId) {
     '</div><div class="sub hint">' + dstr(d.date) + ' • ' + esc(d.creator_name || '') +
     (shortage < 0 ? ' • недостача ' + fmtM(-shortage) : '') +
     (surplus > 0 ? ' • излишки ' + fmtM(surplus) : '') + '</div></div>' +
-    '<div class="card"><h3>Расхождения</h3>' + rows + '</div>';
+    '<div class="card"><h3>Расхождения</h3>' + rows + '</div>' +
+    ((d.chain || []).length
+      ? '<div class="card"><h3>🔗 Цепочка документов</h3>' + d.chain.map(c => {
+          const m = DOC_META[c.type] || ['📄', c.type];
+          return '<button class="chip" style="margin:2px 6px 2px 0" data-chainopen="' + c.id +
+            '">' + m[0] + ' ' + m[1] + ' от ' + dstr(c.date) +
+            (c.status === 'void' ? ' (отменён)' : '') + '</button>';
+        }).join('') + '</div>'
+      : '');
   screen('Отчёт: инвентаризация', html, true);
 }
 
 // ===== мероприятия и точки =====
-const PL_STATE = { calMode: 'day', selKey: null, citySel: [], typeSel: [], whoSel: [] };
+const PL_STATE = { calMode: 'day', selKey: null, citySel: [], typeSel: [], whoSel: [], q: '' };
 const RU_M_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт',
   'ноя', 'дек'];
 const RU_DW = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
@@ -1512,14 +1792,21 @@ async function S_places() {
   let allEvents = evResp.events;
   let allPoints = ptResp.points;
   const sel = PL_STATE; // citySel / typeSel / whoSel живут в состоянии вкладки
+  const textQ = () => (PL_STATE.q || '').toLowerCase().trim();
+  const textMatch = x => {
+    const q = textQ();
+    return !q || (x.name || '').toLowerCase().includes(q) ||
+      (x.city || '').toLowerCase().includes(q) ||
+      (x.address || '').toLowerCase().includes(q);
+  };
   const evMatch = ev =>
     (!sel.citySel.length || sel.citySel.includes(ev.city)) &&
     (!sel.typeSel.length || sel.typeSel.includes(ev.etype || 'Другое')) &&
-    whoMatch(ev, sel.whoSel);
+    whoMatch(ev, sel.whoSel) && textMatch(ev);
   const ptMatch = pt =>
     (!sel.citySel.length || sel.citySel.includes(pt.city)) &&
     (!sel.typeSel.length || sel.typeSel.includes(pt.ptype || 'Другое')) &&
-    whoMatch(pt, sel.whoSel);
+    whoMatch(pt, sel.whoSel) && textMatch(pt);
   const typeOptions = [...new Set(
     allEvents.map(x => x.etype || 'Другое').concat(allPoints.map(x => x.ptype || 'Другое'))
   )].sort();
@@ -1558,16 +1845,24 @@ async function S_places() {
     '<div class="seg" id="cal-mode">' + modes.map(m =>
       '<button' + (PL_STATE.calMode === m[0] ? ' class="on"' : '') + ' data-mode="' + m[0] +
       '">' + m[1] + '</button>').join('') + '</div>' +
-    '<button class="btn secondary" id="fl-open" style="padding:12px" data-nact="1"></button>' +
+    '<div class="searchrow"><span class="sico">🔍</span>' +
+    '<input id="pl-q" placeholder="Поиск точек и мероприятий…" autocomplete="off" value="' +
+    esc(PL_STATE.q || '') + '">' +
+    '<button id="fl-open" title="Фильтры">🎚<span id="fl-n"></span></button></div>' +
     '<div class="addline"><span data-add="event">+ мероприятие</span>' +
     '<span data-add="point">+ точка</span></div>' +
     '<div id="pl-list">' + listBlock() + '</div>';
   const el = screen('', html);
   const flBtn = el.querySelector('#fl-open');
   const flLabel = () => {
-    flBtn.textContent = '⚙️ Фильтры' + (nActive() ? ' (' + nActive() + ')' : '');
+    el.querySelector('#fl-n').textContent = nActive() ? nActive() : '';
   };
   flLabel();
+  const qInp = el.querySelector('#pl-q');
+  qInp.addEventListener('input', () => {
+    clearTimeout(qInp._t);
+    qInp._t = setTimeout(() => { PL_STATE.q = qInp.value; applyAll(); }, 250);
+  });
   const applyAll = () => {
     per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
     el.querySelector('#pl-list').innerHTML = listBlock();
@@ -1869,7 +2164,7 @@ async function S_more() {
         ['prices', '💰', 'Цены продажи'],
         ['sup', '🚛', 'Поставщики'],
       ].concat(ownerish ? [['exp', '🧾', 'Расходы']] : [])
-      .concat([['docs', '📚', 'Документы и отчёты']])
+      .concat([['docs', '📚', 'Документы'], ['reports', '📑', 'Отчёты']])
       .concat(showUsers ? [['users', '👤', 'Пользователи']] : [])
       .concat(admin ? [['set', '⚙️', 'Настройки']] : []);
   const html = menuTiles(items) +
@@ -2141,37 +2436,74 @@ async function S_expenseAdd() {
   };
 }
 
-const DOCS_STATE = { type: '' };
+const DOCS_STATE = { group: '' };
+const DOC_GROUPS = [
+  ['', 'Все', null],
+  ['draft', 'Черновики', null],
+  ['prihod', 'Поступления', ['prihod', 'initial']],
+  ['vydacha', 'Выдачи', ['vydacha']],
+  ['sdacha', 'Приёмки', ['sdacha']],
+  ['transfer', 'Передачи', ['transfer_out', 'transfer_in']],
+  ['money', 'Деньги', ['incass', 'cash']],
+  ['inv', 'Инвентаризация', ['inventory', 'writeoff', 'surplus']],
+  ['price', 'Цены', ['price_change']],
+];
 
 async function S_docs() {
-  const r = await api('/api/docs?limit=100' + (DOCS_STATE.type ? '&type=' + DOCS_STATE.type : ''));
-  const types = [['', 'Все'], ['prihod', 'Поступление'], ['vydacha', 'Выдача'],
-    ['sdacha', 'Сдача'], ['incass', 'Инкассация'], ['cash', 'Наличные'],
-    ['inventory', 'Инвентаризация']];
-  const chips = types.map(t =>
-    '<button class="chip' + (DOCS_STATE.type === t[0] ? ' on' : '') + '" data-t="' + t[0] + '">' +
-    t[1] + '</button>').join('');
-  const el = screen('Документы и отчёты',
+  const r = await api('/api/docs?limit=300');
+  const g = DOC_GROUPS.find(x => x[0] === DOCS_STATE.group) || DOC_GROUPS[0];
+  const docs = r.docs.filter(d =>
+    DOCS_STATE.group === 'draft' ? d.status === 'draft'
+      : !g[2] || g[2].includes(d.type));
+  const chips = DOC_GROUPS.map(t =>
+    '<button class="chip' + (DOCS_STATE.group === t[0] ? ' on' : '') + '" data-t="' + t[0] +
+    '">' + t[1] + '</button>').join('');
+  const el = screen('Документы',
     '<div class="chips">' + chips + '</div>' +
-    (r.docs.length ? r.docs.map(d => docCard(d, true, true)).join('')
-      : '<div class="card hint">Документов нет</div>'), true);
+    (docs.length ? docs.map(d => docCard(d, true, true)).join('')
+      : '<div class="card hint">Документов в этой группе нет</div>'), true);
   el.addEventListener('click', async e => {
+    const post = e.target.closest('[data-docpost]');
+    if (post) {
+      e.preventDefault();
+      if (!(await confirmDlg('Провести «' + post.dataset.docname +
+        '»? Документ начнёт влиять на остатки и балансы.'))) return;
+      try {
+        await api('/api/docs/' + post.dataset.docpost + '/post', 'POST');
+        toast('Проведён ✓', true);
+        PRODUCTS_CACHE = null;
+        render();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    const vd = e.target.closest('[data-docvoid]');
+    if (vd) {
+      e.preventDefault();
+      if (!(await confirmDlg('Отменить «' + vd.dataset.docname +
+        '»? Это сторно: документ останется в истории со статусом «Отменён», а его влияние ' +
+        'на остатки и балансы будет снято.'))) return;
+      try {
+        await api('/api/docs/' + vd.dataset.docvoid + '/void', 'POST');
+        toast('Документ отменён (сторно) ✓', true);
+        PRODUCTS_CACHE = null;
+        render();
+      } catch (err) { toast(err.message); }
+      return;
+    }
     const del = e.target.closest('[data-docdel]');
     if (del) {
-      e.preventDefault(); // не раскрывать документ под кнопкой
-      if (!(await confirmDlg('Удалить документ «' + del.dataset.docname +
-        '»? Остатки и балансы будут пересчитаны, как будто его не было.'))) return;
+      e.preventDefault();
+      if (!(await confirmDlg('Удалить черновик «' + del.dataset.docname + '»?'))) return;
       try {
         await api('/api/docs/' + del.dataset.docdel, 'DELETE');
-        toast('Документ удалён ✓', true);
-        PRODUCTS_CACHE = null;
+        toast('Черновик удалён ✓', true);
         render();
       } catch (err) { toast(err.message); }
       return;
     }
     const c = e.target.closest('.chip[data-t]');
     if (!c) return;
-    DOCS_STATE.type = c.dataset.t;
+    DOCS_STATE.group = c.dataset.t;
     render();
   });
 }

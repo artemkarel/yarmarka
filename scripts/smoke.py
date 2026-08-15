@@ -76,11 +76,41 @@ sk = services.seller_stock(conn, seller["id"])
 eq(sk["hands"][0]["qty"], 7, "на руках после выдачи с полки")
 assert not sk["shelf"], "полка пуста"
 
-# Инвентаризация: факт 57 кг (учёт 58) -> недостача 1 кг по закупу
-d = services.doc_initial_or_inventory(conn, admin, "2026-08-14",
-                                      [{"product_id": p["id"], "qty": 57}], "inventory")
-eq(d["amount"], -1000, "недостача по закупу")
+# Инвентаризация-процесс: ведомость (черновик) -> подсчёт -> проведение
+d = services.doc_initial_or_inventory(conn, admin, "2026-08-14", [], "inventory")
+assert d["status"] == "draft", "ведомость должна быть черновиком"
+eq(services.stock_report(conn)["rows"][0]["qty"], 58, "черновик не трогает склад")
+services.inventory_set_lines(conn, admin, d["id"], [{"product_id": p["id"], "qty": 57}])
+d = services.post_doc(conn, admin, d["id"])
+eq(d["amount"], -1000, "недостача по себестоимости FIFO")
 eq(services.stock_report(conn)["rows"][0]["qty"], 57, "склад после инвентаризации")
+assert any(c["type"] == "writeoff" for c in d["chain"]), "должно появиться списание-дитя"
+
+# Черновик выдачи не трогает остатки, проведение — трогает
+draft = services.doc_vydacha(conn, admin, seller["id"], "2026-08-14",
+                             [{"product_id": p["id"], "qty_wh": 2}], 50, post=False)
+eq(services.stock_report(conn)["rows"][0]["qty"], 57, "черновик выдачи не влияет")
+services.post_doc(conn, admin, draft["id"])
+eq(services.stock_report(conn)["rows"][0]["qty"], 55, "после проведения черновика")
+bal_after_draft = services.seller_balance(conn, seller["id"])["balance"]
+
+# Сторно: отменённый документ снимает влияние, но остаётся в истории
+v = services.void_doc(conn, admin, draft["id"])
+assert v["status"] == "void", "документ должен стать отменённым"
+eq(services.stock_report(conn)["rows"][0]["qty"], 57, "склад вернулся после сторно")
+eq(services.seller_balance(conn, seller["id"])["balance"], bal_after_draft - 2000,
+   "долг снят сторно (2 кг × 2000 × 50%)")
+
+# Передача товара между сотрудниками
+seller2 = services.user_create(conn, 3, "Пётр", "Смирнов", "petr", "Europe/Moscow", {1})
+t = services.doc_transfer(conn, admin, seller["id"], seller2["id"], "2026-08-14",
+                          [{"product_id": p["id"], "qty": 3}], 50)
+eq(t["money"], -3000, "долг ушёл у отправителя")
+sk2 = services.seller_stock(conn, seller2["id"])
+eq(sk2["hands"][0]["qty"], 3, "получатель принял товар")
+eq(services.seller_balance(conn, seller2["id"])["balance"], 3000, "долг приехал получателю")
+services.void_doc(conn, admin, t["id"])
+eq(services.seller_balance(conn, seller2["id"])["balance"], 0, "сторно передачи")
 
 # Аналитика продаж
 rep = services.sales_report(conn, "2026-08-01", "2026-08-31", 50)

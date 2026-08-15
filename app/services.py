@@ -16,7 +16,7 @@ EPS = 1e-6
 ROLES = ("seller", "keeper", "owner", "admin")
 UNITS = ("кг", "шт")
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 
 def r2(x):
@@ -366,12 +366,12 @@ def _date_ok(date):
 
 
 def _doc_insert(conn, dtype, date, created_by, seller_id=None, amount=0.0, money=0.0,
-                comment=None, supplier_id=None):
+                comment=None, supplier_id=None, status="draft", parent_id=None):
     cur = conn.execute(
-        "INSERT INTO docs(type, ts, date, seller_id, supplier_id, created_by, amount, money, comment) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO docs(type, ts, date, seller_id, supplier_id, created_by, amount, money, "
+        "comment, status, parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (dtype, now_utc(), date, seller_id, supplier_id, created_by, r2(amount), r2(money),
-         comment or None),
+         comment or None, status, parent_id),
     )
     return cur.lastrowid
 
@@ -382,7 +382,7 @@ def _line_insert(conn, doc_id, p, **f):
         "qty_sold, qty_before, purchase_price, retail_price) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (doc_id, p["id"], f.get("qty", 0), f.get("qty_shelf", 0), f.get("qty_to_wh", 0),
          f.get("qty_to_shelf", 0), f.get("qty_sold", 0), f.get("qty_before"),
-         p["purchase_price"], p["retail_price"]),
+         f.get("purchase_price", p["purchase_price"]), p["retail_price"]),
     )
 
 
@@ -398,8 +398,77 @@ def _seller_checked(conn, seller_id):
     return u
 
 
-def doc_prihod(conn, user, date, lines, comment=None, supplier_id=None):
-    """Приход товара на склад (при желании — от поставщика)."""
+# ---------- FIFO-партии ----------
+
+def _fifo_out(conn, doc_id, pid, qty, name):
+    """Списывает qty со склада по FIFO. Возвращает полную себестоимость списанного."""
+    need = qty
+    cost = 0.0
+    for lot in conn.execute(
+        "SELECT id, qty_left, unit_cost FROM lots WHERE product_id=? AND qty_left > ? "
+        "ORDER BY id", (pid, EPS),
+    ).fetchall():
+        if need <= EPS:
+            break
+        take = min(need, lot["qty_left"])
+        conn.execute("UPDATE lots SET qty_left = qty_left - ? WHERE id=?", (take, lot["id"]))
+        conn.execute(
+            "INSERT INTO lot_moves(doc_id, lot_id, product_id, qty, unit_cost) VALUES(?,?,?,?,?)",
+            (doc_id, lot["id"], pid, take, lot["unit_cost"]))
+        cost += take * lot["unit_cost"]
+        need -= take
+    if need > EPS:
+        raise ValueError(f"{name}: в партиях не хватает {need:g} — проверьте остатки")
+    return cost
+
+
+def _fifo_in(conn, doc_id, pid, qty, unit_cost):
+    """Создаёт новую партию (поступление, возврат, оприходование)."""
+    cur = conn.execute(
+        "INSERT INTO lots(product_id, qty_left, unit_cost, src_doc_id, created_at) "
+        "VALUES(?,?,?,?,?)", (pid, qty, unit_cost, doc_id, now_utc()))
+    return cur.lastrowid
+
+
+def _last_cost(conn, pid, fallback):
+    r = conn.execute(
+        "SELECT unit_cost FROM lots WHERE product_id=? ORDER BY id DESC LIMIT 1", (pid,)
+    ).fetchone()
+    return float(r["unit_cost"]) if r else fallback
+
+
+def _fifo_reverse(conn, doc_id):
+    """Сторно партионных движений документа: списания возвращаются в те же партии,
+    созданные документом партии удаляются (если их ещё не расходовали)."""
+    for m in conn.execute("SELECT * FROM lot_moves WHERE doc_id=?", (doc_id,)).fetchall():
+        conn.execute("UPDATE lots SET qty_left = qty_left + ? WHERE id=?",
+                     (m["qty"], m["lot_id"]))
+    conn.execute("DELETE FROM lot_moves WHERE doc_id=?", (doc_id,))
+    for lot in conn.execute("SELECT * FROM lots WHERE src_doc_id=?", (doc_id,)).fetchall():
+        used = conn.execute(
+            "SELECT COALESCE(SUM(qty),0) q FROM lot_moves WHERE lot_id=?", (lot["id"],)
+        ).fetchone()["q"]
+        if used > EPS:
+            raise ValueError("Нельзя отменить: товар из этого документа уже расходовался дальше")
+        conn.execute("DELETE FROM lots WHERE id=?", (lot["id"],))
+
+
+def _seller_avg(conn, seller_id, pid):
+    r = conn.execute(
+        "SELECT avg_cost FROM seller_stock WHERE seller_id=? AND product_id=?",
+        (seller_id, pid)).fetchone()
+    return float(r["avg_cost"]) if r else 0.0
+
+
+def _seller_avg_set(conn, seller_id, pid, avg):
+    conn.execute("UPDATE seller_stock SET avg_cost=? WHERE seller_id=? AND product_id=?",
+                 (max(avg, 0.0), seller_id, pid))
+
+
+# ---------- создание документов (по умолчанию черновик не проводится сам) ----------
+
+def doc_prihod(conn, user, date, lines, comment=None, supplier_id=None, post=True):
+    """Поступление товара на склад: каждая строка при проведении станет FIFO-партией."""
     _date_ok(date)
     _need_lines(lines)
     if supplier_id:
@@ -414,49 +483,64 @@ def doc_prihod(conn, user, date, lines, comment=None, supplier_id=None):
         for ln in lines:
             p = _product(conn, ln.get("product_id"))
             qty = _num(ln.get("qty"), p["name"])
-            # новая себестоимость в строке обновляет цену товара; иначе остаётся старая
+            pp = p["purchase_price"]
             if ln.get("purchase_price") is not None:
                 pp = _num(ln.get("purchase_price"), f"Себестоимость: {p['name']}",
                           allow_zero=True)
-                if abs(pp - p["purchase_price"]) > EPS:
-                    conn.execute("UPDATE products SET purchase_price=? WHERE id=?",
-                                 (pp, p["id"]))
-                p["purchase_price"] = pp
-            _stock_set(conn, p["id"], _stock_qty(conn, p["id"]) + qty)
-            _line_insert(conn, doc_id, p, qty=qty)
+            _line_insert(conn, doc_id, p, qty=qty, purchase_price=pp)
             total += qty * p["retail_price"]
         conn.execute("UPDATE docs SET amount=? WHERE id=?", (r2(total), doc_id))
+    if post:
+        post_doc(conn, user, doc_id)
     return doc_get(conn, doc_id)
 
 
 def doc_initial_or_inventory(conn, user, date, lines, kind, comment=None):
-    """Начальные остатки или инвентаризация: установка фактических остатков склада."""
+    """initial — начальные остатки (проводятся сразу).
+    inventory — инвентаризационная ведомость (черновик; проведение создаст
+    списание и оприходование)."""
     if kind not in ("initial", "inventory"):
         raise ValueError("Неизвестный тип документа")
     _date_ok(date)
-    _need_lines(lines)
     with _lock, conn:
         doc_id = _doc_insert(conn, kind, date, user["id"], comment=comment)
-        total = 0.0
-        for ln in lines:
+        for ln in (lines or []):
             p = _product(conn, ln.get("product_id"))
             fact = _num(ln.get("qty"), p["name"], allow_zero=True)
-            before = _stock_qty(conn, p["id"])
-            _stock_set(conn, p["id"], fact)
-            _line_insert(conn, doc_id, p, qty=fact, qty_before=before)
-            total += (fact - before) * p["purchase_price"]
-        # amount: для инвентаризации — сумма расхождений по закупу (может быть < 0)
-        conn.execute("UPDATE docs SET amount=? WHERE id=?", (r2(total), doc_id))
+            _line_insert(conn, doc_id, p, qty=fact, qty_before=_stock_qty(conn, p["id"]))
+    if kind == "initial":
+        _need_lines(lines)
+        post_doc(conn, user, doc_id)
     return doc_get(conn, doc_id)
 
 
-def doc_vydacha(conn, user, seller_id, date, lines, share_pct, comment=None):
+def inventory_set_lines(conn, user, doc_id, lines):
+    """Подсчёт по ведомости: сохраняем/обновляем фактические количества (черновик)."""
+    d = doc_get(conn, doc_id)
+    if d["type"] != "inventory" or d["status"] != "draft":
+        raise ValueError("Подсчёт можно вносить только в черновик ведомости")
+    with _lock, conn:
+        for ln in (lines or []):
+            p = _product(conn, ln.get("product_id"))
+            fact = _num(ln.get("qty"), p["name"], allow_zero=True)
+            row = conn.execute(
+                "SELECT id FROM doc_lines WHERE doc_id=? AND product_id=?",
+                (doc_id, p["id"])).fetchone()
+            if row:
+                conn.execute("UPDATE doc_lines SET qty=? WHERE id=?", (fact, row["id"]))
+            else:
+                _line_insert(conn, doc_id, p, qty=fact, qty_before=_stock_qty(conn, p["id"]))
+    return doc_get(conn, doc_id)
+
+
+def doc_vydacha(conn, user, seller_id, date, lines, share_pct, comment=None, post=True):
     """Выдача товара продавцу под реализацию (со склада и/или с его полки)."""
     _date_ok(date)
     _need_lines(lines)
     _seller_checked(conn, seller_id)
     with _lock, conn:
-        doc_id = _doc_insert(conn, "vydacha", date, user["id"], seller_id=seller_id, comment=comment)
+        doc_id = _doc_insert(conn, "vydacha", date, user["id"], seller_id=seller_id,
+                             comment=comment)
         total = 0.0
         for ln in lines:
             p = _product(conn, ln.get("product_id"))
@@ -466,31 +550,26 @@ def doc_vydacha(conn, user, seller_id, date, lines, share_pct, comment=None):
             if qty < EPS:
                 raise ValueError(f"{p['name']}: укажите количество")
             if p["retail_price"] < EPS:
-                raise ValueError(f"{p['name']}: не задана розничная цена — "
+                raise ValueError(f"{p['name']}: не задана цена продажи — "
                                  "заполните её в номенклатуре перед выдачей")
-            if q_wh > EPS:
-                have = _stock_qty(conn, p["id"])
-                if q_wh > have + EPS:
-                    raise ValueError(f"{p['name']}: на складе только {have:g} {p['unit']}")
-                _stock_set(conn, p["id"], have - q_wh)
-            hands, shelf = _sstock(conn, seller_id, p["id"])
-            if q_shelf > shelf + EPS:
-                raise ValueError(f"{p['name']}: на полке только {shelf:g} {p['unit']}")
-            _sstock_set(conn, seller_id, p["id"], hands + qty, shelf - q_shelf)
             _line_insert(conn, doc_id, p, qty=qty, qty_shelf=q_shelf)
             total += qty * p["retail_price"]
         money = total * share_pct / 100.0
-        conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?", (r2(total), r2(money), doc_id))
+        conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
+                     (r2(total), r2(money), doc_id))
+    if post:
+        post_doc(conn, user, doc_id)
     return doc_get(conn, doc_id)
 
 
-def doc_sdacha(conn, user, seller_id, date, lines, share_pct, comment=None):
-    """Сдача товара продавцом: на склад / на свою полку; остальное — продано."""
+def doc_sdacha(conn, user, seller_id, date, lines, share_pct, comment=None, post=True):
+    """Сдача (приём) товара продавцом: на склад / на полку; остальное — продано."""
     _date_ok(date)
     _need_lines(lines)
     _seller_checked(conn, seller_id)
     with _lock, conn:
-        doc_id = _doc_insert(conn, "sdacha", date, user["id"], seller_id=seller_id, comment=comment)
+        doc_id = _doc_insert(conn, "sdacha", date, user["id"], seller_id=seller_id,
+                             comment=comment)
         sold_total = 0.0
         returned_total = 0.0
         for ln in lines:
@@ -501,22 +580,19 @@ def doc_sdacha(conn, user, seller_id, date, lines, share_pct, comment=None):
             qty = to_wh + to_shelf + sold
             if qty < EPS:
                 continue
-            hands, shelf = _sstock(conn, seller_id, p["id"])
-            if qty > hands + EPS:
-                raise ValueError(f"{p['name']}: у продавца на руках только {hands:g} {p['unit']}")
-            _sstock_set(conn, seller_id, p["id"], hands - qty, shelf + to_shelf)
-            if to_wh > EPS:
-                _stock_set(conn, p["id"], _stock_qty(conn, p["id"]) + to_wh)
-            _line_insert(conn, doc_id, p, qty=qty, qty_to_wh=to_wh, qty_to_shelf=to_shelf, qty_sold=sold)
+            _line_insert(conn, doc_id, p, qty=qty, qty_to_wh=to_wh, qty_to_shelf=to_shelf,
+                         qty_sold=sold)
             sold_total += sold * p["retail_price"]
             returned_total += (to_wh + to_shelf) * p["retail_price"]
         money = -returned_total * share_pct / 100.0
         conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
                      (r2(sold_total), r2(money), doc_id))
+    if post:
+        post_doc(conn, user, doc_id)
     return doc_get(conn, doc_id)
 
 
-def doc_incass(conn, user, seller_id, date, amount, commission_pct, comment=None):
+def doc_incass(conn, user, seller_id, date, amount, commission_pct, comment=None, post=True):
     """Инкассация: сумма терминала за день, к зачёту минус комиссия."""
     _date_ok(date)
     _seller_checked(conn, seller_id)
@@ -525,10 +601,12 @@ def doc_incass(conn, user, seller_id, date, amount, commission_pct, comment=None
     with _lock, conn:
         doc_id = _doc_insert(conn, "incass", date, user["id"], seller_id=seller_id,
                              amount=amt, money=-credited, comment=comment)
+    if post:
+        post_doc(conn, user, doc_id)
     return doc_get(conn, doc_id)
 
 
-def doc_cash(conn, user, seller_id, date, amount, comment=None):
+def doc_cash(conn, user, seller_id, date, amount, comment=None, post=True):
     """Наличный расчёт: amount > 0 — продавец отдал нам, < 0 — мы отдали продавцу."""
     _date_ok(date)
     _seller_checked(conn, seller_id)
@@ -536,6 +614,276 @@ def doc_cash(conn, user, seller_id, date, amount, comment=None):
     with _lock, conn:
         doc_id = _doc_insert(conn, "cash", date, user["id"], seller_id=seller_id,
                              amount=amt, money=-amt, comment=comment)
+    if post:
+        post_doc(conn, user, doc_id)
+    return doc_get(conn, doc_id)
+
+
+def doc_transfer(conn, user, from_id, to_id, date, lines, share_pct, comment=None):
+    """Передача товара между сотрудниками: пара связанных документов «отдал/принял».
+    Долг за товар переезжает вместе с товаром, себестоимость — по средней отправителя."""
+    _date_ok(date)
+    _need_lines(lines)
+    if int(from_id or 0) == int(to_id or 0):
+        raise ValueError("Выберите двух разных сотрудников")
+    _seller_checked(conn, from_id)
+    _seller_checked(conn, to_id)
+    with _lock, conn:
+        out_id = _doc_insert(conn, "transfer_out", date, user["id"], seller_id=from_id,
+                             comment=comment, status="posted")
+        in_id = _doc_insert(conn, "transfer_in", date, user["id"], seller_id=to_id,
+                            comment=comment, status="posted", parent_id=out_id)
+        total = 0.0
+        for ln in lines:
+            p = _product(conn, ln.get("product_id"))
+            qty = _num(ln.get("qty"), p["name"])
+            hands_f, shelf_f = _sstock(conn, from_id, p["id"])
+            if qty > hands_f + EPS:
+                raise ValueError(f"{p['name']}: у отправителя на руках только {hands_f:g} "
+                                 f"{p['unit']}")
+            avg_f = _seller_avg(conn, from_id, p["id"])
+            hands_t, shelf_t = _sstock(conn, to_id, p["id"])
+            avg_t = _seller_avg(conn, to_id, p["id"])
+            base_t = hands_t + shelf_t
+            new_avg_t = ((base_t * avg_t + qty * avg_f) / (base_t + qty)
+                         if (base_t + qty) > EPS else avg_f)
+            _sstock_set(conn, from_id, p["id"], hands_f - qty, shelf_f)
+            _sstock_set(conn, to_id, p["id"], hands_t + qty, shelf_t)
+            _seller_avg_set(conn, to_id, p["id"], new_avg_t)
+            _line_insert(conn, out_id, p, qty=qty, purchase_price=r2(avg_f))
+            _line_insert(conn, in_id, p, qty=qty, purchase_price=r2(avg_f))
+            total += qty * p["retail_price"]
+        money = r2(total * share_pct / 100.0)
+        conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
+                     (r2(total), -money, out_id))
+        conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
+                     (r2(total), money, in_id))
+    return doc_get(conn, out_id)
+
+
+def doc_price_change(conn, user, changes):
+    """Журнальный документ смены цен продажи (создаётся автоматически, сразу проведён)."""
+    if not changes:
+        return None
+    with _lock, conn:
+        doc_id = _doc_insert(conn, "price_change", now_utc()[:10], user["id"], status="posted")
+        for ch in changes:
+            p = _product(conn, ch["product_id"])
+            _line_insert(conn, doc_id, p, qty_before=ch["old"], purchase_price=ch["old"])
+    return doc_id
+
+
+# ---------- проведение / сторно ----------
+
+def post_doc(conn, user, doc_id):
+    """Проведение: черновик начинает влиять на остатки, партии и балансы."""
+    d = doc_get(conn, doc_id)
+    if d["status"] != "draft":
+        raise ValueError("Документ уже проведён или отменён")
+    t = d["type"]
+    with _lock, conn:
+        if t == "prihod":
+            for l in d["lines"]:
+                _stock_set(conn, l["product_id"],
+                           _stock_qty(conn, l["product_id"]) + l["qty"])
+                _fifo_in(conn, doc_id, l["product_id"], l["qty"], l["purchase_price"])
+                cur = conn.execute(
+                    "SELECT purchase_price FROM products WHERE id=?",
+                    (l["product_id"],)).fetchone()
+                if abs(cur["purchase_price"] - l["purchase_price"]) > EPS:
+                    conn.execute("UPDATE products SET purchase_price=? WHERE id=?",
+                                 (l["purchase_price"], l["product_id"]))
+        elif t == "initial":
+            for l in d["lines"]:
+                conn.execute("UPDATE lots SET qty_left=0 WHERE product_id=? AND qty_left>0",
+                             (l["product_id"],))
+                _stock_set(conn, l["product_id"], l["qty"])
+                if l["qty"] > EPS:
+                    _fifo_in(conn, doc_id, l["product_id"], l["qty"], l["purchase_price"])
+        elif t == "vydacha":
+            sid = d["seller_id"]
+            for l in d["lines"]:
+                pid = l["product_id"]
+                q_shelf = l["qty_shelf"]
+                q_wh = l["qty"] - q_shelf
+                cost = 0.0
+                if q_wh > EPS:
+                    have = _stock_qty(conn, pid)
+                    if q_wh > have + EPS:
+                        raise ValueError(f"{l['name']}: на складе только {have:g} {l['unit']}")
+                    _stock_set(conn, pid, have - q_wh)
+                    cost += _fifo_out(conn, doc_id, pid, q_wh, l["name"])
+                hands, shelf = _sstock(conn, sid, pid)
+                if q_shelf > shelf + EPS:
+                    raise ValueError(f"{l['name']}: на полке только {shelf:g} {l['unit']}")
+                avg = _seller_avg(conn, sid, pid)
+                cost_wh = cost              # FIFO-себестоимость части со склада
+                cost += q_shelf * avg       # полочная часть — по средней продавца
+                unit_cost = cost / l["qty"] if l["qty"] > EPS else 0.0
+                # средняя себестоимость всей массы продавца (руки + полка):
+                # полочная часть уже в базе, новой массой считается только склад
+                base_mass = hands + shelf
+                new_avg = ((base_mass * avg + cost_wh) / (base_mass + q_wh)
+                           if (base_mass + q_wh) > EPS else unit_cost)
+                _sstock_set(conn, sid, pid, hands + l["qty"], shelf - q_shelf)
+                _seller_avg_set(conn, sid, pid, new_avg)
+                conn.execute("UPDATE doc_lines SET purchase_price=? WHERE id=?",
+                             (r2(unit_cost), l["id"]))
+        elif t == "sdacha":
+            sid = d["seller_id"]
+            for l in d["lines"]:
+                pid = l["product_id"]
+                hands, shelf = _sstock(conn, sid, pid)
+                if l["qty"] > hands + EPS:
+                    raise ValueError(f"{l['name']}: у продавца на руках только {hands:g} "
+                                     f"{l['unit']}")
+                avg = _seller_avg(conn, sid, pid)
+                _sstock_set(conn, sid, pid, hands - l["qty"], shelf + l["qty_to_shelf"])
+                if l["qty_to_wh"] > EPS:
+                    _stock_set(conn, pid, _stock_qty(conn, pid) + l["qty_to_wh"])
+                    _fifo_in(conn, doc_id, pid, l["qty_to_wh"], avg)
+                conn.execute("UPDATE doc_lines SET purchase_price=? WHERE id=?",
+                             (r2(avg), l["id"]))
+        elif t == "inventory":
+            # ведомость: проведение рождает списание (недостачи) и оприходование (излишки)
+            wo_lines, sp_lines = [], []
+            for l in d["lines"]:
+                current = _stock_qty(conn, l["product_id"])
+                diff = l["qty"] - current
+                conn.execute("UPDATE doc_lines SET qty_before=? WHERE id=?",
+                             (current, l["id"]))
+                if diff < -EPS:
+                    wo_lines.append((l, -diff))
+                elif diff > EPS:
+                    sp_lines.append((l, diff))
+            total = 0.0
+            if wo_lines:
+                wo_id = _doc_insert(conn, "writeoff", d["date"], user["id"],
+                                    parent_id=doc_id, status="draft",
+                                    comment="Недостача по инвентаризации")
+                wo_total = 0.0
+                for l, q in wo_lines:
+                    pid = l["product_id"]
+                    cost = _fifo_out(conn, wo_id, pid, q, l["name"])
+                    _stock_set(conn, pid, _stock_qty(conn, pid) - q)
+                    p = _product(conn, pid)
+                    _line_insert(conn, wo_id, p, qty=q,
+                                 purchase_price=r2(cost / q if q > EPS else 0))
+                    conn.execute("UPDATE doc_lines SET purchase_price=? WHERE doc_id=? AND "
+                                 "product_id=?", (r2(cost / q if q > EPS else 0), doc_id, pid))
+                    wo_total += cost
+                conn.execute("UPDATE docs SET amount=?, status='posted' WHERE id=?",
+                             (r2(-wo_total), wo_id))
+                total -= wo_total
+            if sp_lines:
+                sp_id = _doc_insert(conn, "surplus", d["date"], user["id"],
+                                    parent_id=doc_id, status="draft",
+                                    comment="Излишки по инвентаризации")
+                sp_total = 0.0
+                for l, q in sp_lines:
+                    pid = l["product_id"]
+                    p = _product(conn, pid)
+                    cost_u = _last_cost(conn, pid, p["purchase_price"])
+                    _fifo_in(conn, sp_id, pid, q, cost_u)
+                    _stock_set(conn, pid, _stock_qty(conn, pid) + q)
+                    _line_insert(conn, sp_id, p, qty=q, purchase_price=r2(cost_u))
+                    conn.execute("UPDATE doc_lines SET purchase_price=? WHERE doc_id=? AND "
+                                 "product_id=?", (r2(cost_u), doc_id, pid))
+                    sp_total += cost_u * q
+                conn.execute("UPDATE docs SET amount=?, status='posted' WHERE id=?",
+                             (r2(sp_total), sp_id))
+                total += sp_total
+            conn.execute("UPDATE docs SET amount=? WHERE id=?", (r2(total), doc_id))
+        elif t in ("incass", "cash"):
+            pass  # только денежный эффект, он включается статусом
+        else:
+            raise ValueError("Этот документ нельзя провести")
+        conn.execute("UPDATE docs SET status='posted' WHERE id=?", (doc_id,))
+    return doc_get(conn, doc_id)
+
+
+def void_doc(conn, user, doc_id):
+    """Сторно: документ остаётся в истории со статусом «Отменён», его влияние снимается."""
+    d = doc_get(conn, doc_id)
+    if d["status"] != "posted":
+        raise ValueError("Отменить можно только проведённый документ")
+    t = d["type"]
+    with _lock, conn:
+        if t == "prihod":
+            for l in d["lines"]:
+                have = _stock_qty(conn, l["product_id"])
+                if l["qty"] > have + EPS:
+                    raise ValueError(f"{l['name']}: нельзя отменить — товар уже израсходован "
+                                     "со склада")
+                _stock_set(conn, l["product_id"], have - l["qty"])
+            _fifo_reverse(conn, doc_id)
+        elif t == "vydacha":
+            sid = d["seller_id"]
+            for l in d["lines"]:
+                pid = l["product_id"]
+                hands, shelf = _sstock(conn, sid, pid)
+                if l["qty"] > hands + EPS:
+                    raise ValueError(f"{l['name']}: нельзя отменить — продавец уже сдал или "
+                                     "продал этот товар")
+                q_shelf = l["qty_shelf"]
+                _sstock_set(conn, sid, pid, hands - l["qty"], shelf + q_shelf)
+                q_wh = l["qty"] - q_shelf
+                if q_wh > EPS:
+                    _stock_set(conn, pid, _stock_qty(conn, pid) + q_wh)
+            _fifo_reverse(conn, doc_id)
+        elif t == "sdacha":
+            sid = d["seller_id"]
+            _fifo_reverse(conn, doc_id)  # упадёт, если возвращённый товар уже ушёл
+            for l in d["lines"]:
+                pid = l["product_id"]
+                hands, shelf = _sstock(conn, sid, pid)
+                if l["qty_to_shelf"] > shelf + EPS:
+                    raise ValueError(f"{l['name']}: нельзя отменить — товар с полки уже выдан")
+                if l["qty_to_wh"] > EPS:
+                    _stock_set(conn, pid, _stock_qty(conn, pid) - l["qty_to_wh"])
+                _sstock_set(conn, sid, pid, hands + l["qty"], shelf - l["qty_to_shelf"])
+        elif t == "inventory":
+            for ch in conn.execute(
+                "SELECT id, status FROM docs WHERE parent_id=?", (doc_id,)
+            ).fetchall():
+                if ch["status"] == "posted":
+                    void_doc(conn, user, ch["id"])
+        elif t == "writeoff":
+            _fifo_reverse(conn, doc_id)
+            for l in d["lines"]:
+                _stock_set(conn, l["product_id"],
+                           _stock_qty(conn, l["product_id"]) + l["qty"])
+        elif t == "surplus":
+            _fifo_reverse(conn, doc_id)
+            for l in d["lines"]:
+                have = _stock_qty(conn, l["product_id"])
+                if l["qty"] > have + EPS:
+                    raise ValueError(f"{l['name']}: нельзя отменить — излишек уже израсходован")
+                _stock_set(conn, l["product_id"], have - l["qty"])
+        elif t in ("incass", "cash"):
+            pass
+        elif t == "transfer_in":
+            # отменяем всегда пару целиком — через документ отправителя
+            return void_doc(conn, user, d["parent_id"])
+        elif t == "transfer_out":
+            to_doc = conn.execute(
+                "SELECT id, seller_id FROM docs WHERE parent_id=? AND type='transfer_in'",
+                (doc_id,)).fetchone()
+            for l in d["lines"]:
+                pid = l["product_id"]
+                hands_t, shelf_t = _sstock(conn, to_doc["seller_id"], pid)
+                if l["qty"] > hands_t + EPS:
+                    raise ValueError(f"{l['name']}: нельзя отменить — получатель уже сдал "
+                                     "или продал этот товар")
+                hands_f, shelf_f = _sstock(conn, d["seller_id"], pid)
+                _sstock_set(conn, to_doc["seller_id"], pid, hands_t - l["qty"], shelf_t)
+                _sstock_set(conn, d["seller_id"], pid, hands_f + l["qty"], shelf_f)
+            conn.execute("UPDATE docs SET status='void' WHERE id=?", (to_doc["id"],))
+        elif t == "initial":
+            raise ValueError("Начальные остатки нельзя отменить — исправьте инвентаризацией")
+        else:
+            raise ValueError("Этот документ нельзя отменить")
+        conn.execute("UPDATE docs SET status='void' WHERE id=?", (doc_id,))
     return doc_get(conn, doc_id)
 
 
@@ -554,19 +902,35 @@ def doc_get(conn, doc_id):
         "SELECT l.*, p.name, p.unit FROM doc_lines l JOIN products p ON p.id = l.product_id "
         "WHERE l.doc_id=? ORDER BY p.name", (doc_id,),
     )]
-    return {**dict(d), "lines": lines}
+    out = {**dict(d), "lines": lines}
+    # цепочка: родитель и дети
+    chain = []
+    if d["parent_id"]:
+        pr = conn.execute("SELECT id, type, date, status, amount FROM docs WHERE id=?",
+                          (d["parent_id"],)).fetchone()
+        if pr:
+            chain.append({**dict(pr), "rel": "parent"})
+    for ch in conn.execute(
+        "SELECT id, type, date, status, amount FROM docs WHERE parent_id=? ORDER BY id",
+        (doc_id,),
+    ):
+        chain.append({**dict(ch), "rel": "child"})
+    out["chain"] = chain
+    return out
 
 
-def docs_list(conn, dtype=None, seller_id=None, limit=100):
+def docs_list(conn, dtype=None, seller_id=None, limit=100, types=None):
     q = ("SELECT d.*, u.first_name || ' ' || u.last_name AS creator_name, "
-         "s.first_name || ' ' || s.last_name AS seller_name, sup.name AS supplier_name "
+         "s.first_name || ' ' || s.last_name AS seller_name "
          "FROM docs d JOIN users u ON u.id = d.created_by "
-         "LEFT JOIN users s ON s.id = d.seller_id "
-         "LEFT JOIN suppliers sup ON sup.id = d.supplier_id WHERE 1=1")
+         "LEFT JOIN users s ON s.id = d.seller_id WHERE 1=1")
     args = []
     if dtype:
         q += " AND d.type=?"
         args.append(dtype)
+    if types:
+        q += " AND d.type IN (%s)" % ",".join("?" * len(types))
+        args.extend(types)
     if seller_id:
         q += " AND d.seller_id=?"
         args.append(seller_id)
@@ -576,42 +940,11 @@ def docs_list(conn, dtype=None, seller_id=None, limit=100):
 
 
 def doc_delete(conn, user, doc_id):
-    """Удаление документа со сторно: остатки и балансы возвращаются как до него.
-    Если товар по документу уже израсходован дальше — удалить нельзя."""
+    """Физическое удаление — только для черновиков. Проведённые отменяются (сторно)."""
     d = doc_get(conn, doc_id)
-    t = d["type"]
-    sid = d["seller_id"]
+    if d["status"] == "posted":
+        raise ValueError("Проведённый документ не удаляется — его можно только отменить")
     with _lock, conn:
-        for l in d["lines"]:
-            pid = l["product_id"]
-            if t == "prihod":
-                have = _stock_qty(conn, pid)
-                if l["qty"] > have + EPS:
-                    raise ValueError(f"{l['name']}: нельзя удалить — товар из этого "
-                                     "поступления уже израсходован со склада")
-                _stock_set(conn, pid, have - l["qty"])
-            elif t in ("initial", "inventory"):
-                if l["qty_before"] is not None:
-                    _stock_set(conn, pid, l["qty_before"])
-            elif t == "vydacha":
-                hands, shelf = _sstock(conn, sid, pid)
-                if l["qty"] > hands + EPS:
-                    raise ValueError(f"{l['name']}: нельзя удалить — продавец уже сдал "
-                                     "или продал этот товар")
-                _sstock_set(conn, sid, pid, hands - l["qty"], shelf + l["qty_shelf"])
-                q_wh = l["qty"] - l["qty_shelf"]
-                if q_wh > EPS:
-                    _stock_set(conn, pid, _stock_qty(conn, pid) + q_wh)
-            elif t == "sdacha":
-                hands, shelf = _sstock(conn, sid, pid)
-                if l["qty_to_wh"] > _stock_qty(conn, pid) + EPS:
-                    raise ValueError(f"{l['name']}: нельзя удалить — возвращённый товар "
-                                     "уже ушёл со склада")
-                if l["qty_to_shelf"] > shelf + EPS:
-                    raise ValueError(f"{l['name']}: нельзя удалить — товар с полки "
-                                     "уже выдан заново")
-                _stock_set(conn, pid, _stock_qty(conn, pid) - l["qty_to_wh"])
-                _sstock_set(conn, sid, pid, hands + l["qty"], shelf - l["qty_to_shelf"])
         conn.execute("DELETE FROM doc_lines WHERE doc_id=?", (doc_id,))
         conn.execute("DELETE FROM docs WHERE id=?", (doc_id,))
     return {"deleted": True}
@@ -622,7 +955,7 @@ def doc_delete(conn, user, doc_id):
 def seller_balance(conn, seller_id):
     rows = conn.execute(
         "SELECT type, COALESCE(SUM(money),0) m, COALESCE(SUM(amount),0) a, COUNT(*) n "
-        "FROM docs WHERE seller_id=? GROUP BY type", (seller_id,),
+        "FROM docs WHERE seller_id=? AND status='posted' GROUP BY type", (seller_id,),
     ).fetchall()
     by = {r["type"]: r for r in rows}
 
@@ -719,7 +1052,7 @@ def sales_report(conn, date_from, date_to, share_pct):
         "l.retail_price, p.name pname, p.unit "
         "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
         "JOIN products p ON p.id = l.product_id JOIN users s ON s.id = d.seller_id "
-        "WHERE d.type='sdacha' AND d.date BETWEEN ? AND ? AND l.qty_sold > ?",
+        "WHERE d.type='sdacha' AND d.status='posted' AND d.date BETWEEN ? AND ? AND l.qty_sold > ?",
         (date_from, date_to, EPS),
     ):
         c = cell(r["seller_id"], r["name"])
@@ -737,7 +1070,7 @@ def sales_report(conn, date_from, date_to, share_pct):
     for r in conn.execute(
         "SELECT d.seller_id, s.first_name || ' ' || s.last_name AS name, d.type, "
         "SUM(d.amount) a, SUM(d.money) m FROM docs d JOIN users s ON s.id = d.seller_id "
-        "WHERE d.type IN ('incass','cash') AND d.date BETWEEN ? AND ? GROUP BY d.seller_id, d.type",
+        "WHERE d.type IN ('incass','cash') AND d.status='posted' AND d.date BETWEEN ? AND ? GROUP BY d.seller_id, d.type",
         (date_from, date_to),
     ):
         c = cell(r["seller_id"], r["name"])
@@ -1046,7 +1379,7 @@ def profit_report(conn, date_from, date_to, share_pct):
         "SELECT COALESCE(SUM(l.qty_sold * l.retail_price),0) sold, "
         "COALESCE(SUM(l.qty_sold * l.purchase_price),0) cogs "
         "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
-        "WHERE d.type='sdacha' AND d.date BETWEEN ? AND ?",
+        "WHERE d.type='sdacha' AND d.status='posted' AND d.date BETWEEN ? AND ?",
         (date_from, date_to),
     ).fetchone()
     turnover = float(r["sold"])
@@ -1054,13 +1387,14 @@ def profit_report(conn, date_from, date_to, share_pct):
     revenue = turnover * share_pct / 100.0
     inv = conn.execute(
         "SELECT COALESCE(SUM(amount),0) a FROM docs "
-        "WHERE type='inventory' AND date BETWEEN ? AND ?",
+        "WHERE type IN ('writeoff','surplus') AND status='posted' "
+        "AND date BETWEEN ? AND ?",
         (date_from, date_to),
     ).fetchone()
     inventory_delta = float(inv["a"])
     term = conn.execute(
         "SELECT COALESCE(SUM(amount),0) a, COALESCE(SUM(money),0) m FROM docs "
-        "WHERE type='incass' AND date BETWEEN ? AND ?",
+        "WHERE type='incass' AND status='posted' AND date BETWEEN ? AND ?",
         (date_from, date_to),
     ).fetchone()
     exp = expenses_list(conn, date_from, date_to)
@@ -1125,7 +1459,7 @@ def hands_nonzero(conn, seller_id):
 
 def incass_exists(conn, seller_id, date):
     r = conn.execute(
-        "SELECT 1 FROM docs WHERE type='incass' AND seller_id=? AND date=? LIMIT 1",
+        "SELECT 1 FROM docs WHERE type='incass' AND status='posted' AND seller_id=? AND date=? LIMIT 1",
         (seller_id, date),
     ).fetchone()
     return r is not None
