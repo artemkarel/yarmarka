@@ -2940,10 +2940,14 @@ async function S_eventView(ev, meta) {
     (ev.date_to && ev.date_to !== ev.date_from ? ' – ' + dstr(ev.date_to) : '');
   const parts = (ev.comment || '').split(' • ').filter(Boolean);
   const addr = parts[0] || '';
-  const contacts = parts.slice(1);
   // телефоны организатора — отдельными кликабельными строками (звонок в один тап)
-  const phones = [...new Set(((ev.comment || '').match(/(?:\+7|8)[\d\s()\-]{9,}/g) || [])
-    .map(p => p.trim()))];
+  const phoneRe = /(?:\+7|8)[\d\s()\-]{9,}/g;
+  const phones = [...new Set(((ev.comment || '').match(phoneRe) || []).map(p => p.trim()))];
+  // в доп-инфе номера не дублируем — они уже показаны строкой «Телефон»
+  const contacts = parts.slice(1)
+    .map(s => s.replace(phoneRe, '').replace(/тел\.?:?\s*/gi, '')
+      .replace(/\s{2,}/g, ' ').replace(/^[\s,;:–—-]+|[\s,;:–—-]+$/g, ''))
+    .filter(Boolean);
   const telHref = p => {
     let d = p.replace(/\D/g, '');
     if (d.length === 11 && d[0] === '8') d = '7' + d.slice(1);
@@ -2962,9 +2966,10 @@ async function S_eventView(ev, meta) {
     (addr ? row('📍 Площадка', esc(addr)) : '') +
     row('👤 Кто ездит', ev.owner_name ? esc(ev.owner_name)
       : '<span class="green">свободно</span>') +
+    // настоящая ссылка, а не кнопка с location.href: Телеграм открывает tel:
+    // только по «живому» тапу по ссылке (навигация linkActivated)
     phones.map(p => row('📞 Телефон',
-      '<button class="telbtn" data-tel="' + telHref(p) + '">' + esc(p) + '</button>'))
-      .join('') +
+      '<a class="telbtn" href="' + telHref(p) + '">' + esc(p) + '</a>')).join('') +
     (contacts.length
       ? '<div class="hint small" style="margin-top:8px">' + esc(contacts.join(' • ')) + '</div>'
       : '') +
@@ -2976,10 +2981,6 @@ async function S_eventView(ev, meta) {
   bookingBlock(el, 'event', ev.id, meta, ev);
   // карта открывается внутри приложения, сразу на городе мероприятия
   el.querySelector('#ev-map').onclick = () => push(S_map, { focusCity: ev.city, meta: meta });
-  el.addEventListener('click', e => {
-    const tb = e.target.closest('[data-tel]');
-    if (tb) window.location.href = tb.dataset.tel; // набор номера из WebView
-  });
   el.querySelector('#ev-edit').onclick = () => push(S_eventEdit, ev, meta);
 }
 
@@ -3039,9 +3040,9 @@ async function S_pointEdit(pt, meta, scrollToBooking) {
     ? '<div class="card"><h3>📞 Контакты точки</h3>' +
       '<div class="row"><div class="l hint">Телефон</div><div class="r val">' +
       (pt.phone
-        ? '<button class="telbtn" onclick="window.location.href=\'tel:+' +
-          esc((pt.phone.replace(/\D/g, '').replace(/^8/, '7'))) + '\'">' +
-          esc(pt.phone) + '</button>'
+        ? '<a class="telbtn" href="tel:+' +
+          esc(pt.phone.replace(/\D/g, '').replace(/^8/, '7')) + '">' +
+          esc(pt.phone) + '</a>'
         : '<span class="hint">не указан</span>') + '</div></div>' +
       '<div class="row"><div class="l hint">Почта</div><div class="r val">' +
       (pt.email ? '<a href="mailto:' + esc(pt.email) + '">' + esc(pt.email) + '</a>'
