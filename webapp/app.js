@@ -408,6 +408,28 @@ function menuTiles(items) {
     '</span>' + it[2] + '</button>').join('') + '</div>';
 }
 
+// строгие линейные иконки для меню-строк
+const ROW_ICONS = {
+  arrowdown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v14"/><path d="m6 12 6 6 6-6"/></svg>',
+  swap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13"/><path d="m14 4 4 4-4 4"/><path d="M20 16H7"/><path d="m10 12-4 4 4 4"/></svg>',
+  tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11V4h7l10 10-7 7L3 11Z"/><circle cx="7.5" cy="8.5" r="1.4"/></svg>',
+  clipboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4.2V2.8h6v1.4"/><path d="M9 10h6"/><path d="M9 14h6"/></svg>',
+  pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h8"/><path d="M16.4 3.6a2.1 2.1 0 0 1 3 3L7.5 18.5 3 20l1.5-4.5Z"/></svg>',
+  truck: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6h12v10H2z"/><path d="M14 10h4l4 3v3h-8"/><circle cx="6.5" cy="18" r="1.8"/><circle cx="17.5" cy="18" r="1.8"/></svg>',
+  card: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5.5" width="19" height="13" rx="2.5"/><path d="M2.5 10h19"/></svg>',
+  book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6c-2-1.4-4.5-2-8-2v14c3.5 0 6 .6 8 2 2-1.4 4.5-2 8-2V4c-3.5 0-6 .6-8 2Z"/><path d="M12 6v14"/></svg>',
+  file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2.5H6v19h12v-15Z"/><path d="M14 2.5v4.5h4"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
+  people: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 20c.8-3.2 3.4-5 6.5-5s5.7 1.8 6.5 5"/><circle cx="17" cy="9" r="2.6"/><path d="M16 15.2c2.6.2 4.6 1.8 5.3 4.3"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+};
+
+function menuRows(items) {
+  return '<div class="rowmenu">' + items.map(it =>
+    '<button class="rowbtn" data-menu="' + it[0] + '"><span class="rico">' +
+    (ROW_ICONS[it[1]] || '') + '</span>' + it[2] + '</button>').join('') + '</div>';
+}
+
 function bindMenu(el, handlers) {
   el.addEventListener('click', e => {
     const m = e.target.closest('[data-menu]');
@@ -779,10 +801,12 @@ async function S_sklad() {
     '<div class="tile"><div class="tl">Себестоимость</div><div class="tv">' + fmtM(t.purchase_value) + '</div></div>' +
     '<div class="tile"><div class="tl">Сумма продаж</div><div class="tv">' + fmtM(t.retail_value) + '</div></div>' +
     '</div>' +
-    menuTiles([
-      ['prihod', '📥', 'Поступление товара', true],
-      ['inv', '🔍', 'Инвентаризация'],
-      ['init', '📋', 'Начальные остатки'],
+    menuRows([
+      ['prihod', 'arrowdown', 'Поступление товара'],
+      ['transfer', 'swap', 'Перемещение между сотрудниками'],
+      ['products', 'tag', 'Номенклатура'],
+      ['inv', 'clipboard', 'Инвентаризация'],
+      ['init', 'pencil', 'Начальные остатки'],
     ]) +
     '<div class="field"><input id="sk-q" placeholder="🔍 Поиск по остаткам…"></div>' +
     '<div class="card"><h3>Остатки на складе</h3>' +
@@ -791,6 +815,8 @@ async function S_sklad() {
   const el = screen('', html);
   bindMenu(el, {
     prihod: () => push(S_prihod),
+    transfer: () => push(S_transferPick),
+    products: () => push(S_products),
     inv: () => push(S_invStart),
     init: () => push(S_countSheet, 'initial'),
   });
@@ -1314,6 +1340,28 @@ async function S_sdacha(sid) {
 }
 
 // передача товара от одного сотрудника другому (делает кладовщик)
+// перемещение из склада: сначала выбираем, кто отдаёт товар
+async function S_transferPick() {
+  const r = await api('/api/sellers');
+  const withGoods = r.sellers.filter(s => s.hands_value > 0.005);
+  const html = withGoods.length
+    ? '<div class="card hint small">Кто передаёт товар?</div>' +
+      withGoods.map(s =>
+        '<div class="card" data-pick="' + s.id + '" style="cursor:pointer">' +
+        '<div class="row" style="border:none;padding:2px 0"><div class="l">' +
+        '<div class="name">' + esc(s.name) + '</div>' +
+        '<div class="sub">на руках на ' + fmtM(s.hands_value) + '</div></div>' +
+        '<div class="r hint">›</div></div></div>').join('')
+    : '<div class="card hint">Ни у кого нет товара на руках — перемещать нечего.</div>';
+  const el = screen('Перемещение товара', html, true);
+  el.addEventListener('click', e => {
+    const c = e.target.closest('[data-pick]');
+    if (!c) return;
+    stack.pop(); // после операции «назад» вернёт сразу на склад
+    push(S_transfer, +c.dataset.pick);
+  });
+}
+
 async function S_transfer(fromSid) {
   const [info, sellersResp] = await Promise.all([
     api('/api/sellers/' + fromSid), api('/api/sellers'),
@@ -1544,6 +1592,8 @@ async function S_invReport(docId) {
 const PL_STATE = { calMode: 'day', selKey: null, citySel: [], typeSel: [], whoSel: [], q: '' };
 const RU_M_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт',
   'ноя', 'дек'];
+const RU_M_FULL = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август',
+  'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const RU_DW = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
 
 function addDays(d, n) { return new Date(d.getTime() + n * 864e5); }
@@ -1561,19 +1611,25 @@ function calPeriod(mode, key) {
   if (mode === 'day') return { from: key, to: key };
   return { from: key, to: isoDate(new Date(d.getFullYear(), d.getMonth() + 1, 0)) };
 }
-function calItems(mode) {
+function calItems(mode, selKey) {
   const out = [];
   const t = new Date();
   if (mode === 'day') {
     const t0 = new Date(t.getFullYear(), t.getMonth(), t.getDate());
-    for (let i = -30; i <= 120; i++) {
-      const d = addDays(t0, i);
+    // диапазон покрывает и сегодня, и выбранную дату (переход по месяцам/годам)
+    let a = addDays(t0, -30), b = addDays(t0, 120);
+    if (selKey) {
+      const s = new Date(selKey + 'T00:00:00');
+      if (s < a) a = addDays(s, -31);
+      if (addDays(s, 62) > b) b = addDays(s, 62);
+    }
+    for (let d = a; d <= b; d = addDays(d, 1)) {
       const first = d.getDate() === 1;
       out.push({ key: isoDate(d), dw: RU_DW[d.getDay()],
         we: d.getDay() === 0 || d.getDay() === 6,
         dn: String(d.getDate()) +
           (first ? ' <span class="dm">' + RU_M_SHORT[d.getMonth()] + '</span>' : ''),
-        month: RU_M_SHORT[d.getMonth()] });
+        month: RU_M_SHORT[d.getMonth()], mi: d.getMonth(), yr: d.getFullYear() });
     }
   } else {
     for (let i = -3; i <= 14; i++) {
@@ -1729,6 +1785,53 @@ function whoMatch(x, whoSel) {
     (x.bookings || []).some(b => b.user_id === id));
 }
 
+// выбор месяца и года для шкалы дат: тап по месяцу сразу переносит календарь
+function openMonthSheet(selKey, onPick) {
+  const cur = new Date((selKey || today()) + 'T00:00:00');
+  let year = cur.getFullYear();
+  const nowY = new Date().getFullYear();
+  const years = [];
+  for (let y = nowY - 1; y <= nowY + 2; y++) years.push(y);
+  const bg = document.createElement('div');
+  bg.className = 'sheetbg';
+  const sh = document.createElement('div');
+  sh.className = 'sheet';
+  const close = () => {
+    document.body.classList.remove('sheet-open');
+    bg.remove(); sh.remove();
+  };
+  const draw = () => {
+    sh.innerHTML =
+      '<div class="sheethandle"></div>' +
+      '<h3 style="margin-bottom:10px">Месяц и год</h3>' +
+      '<div class="chipwrap">' + years.map(y =>
+        '<button class="chip' + (y === year ? ' on' : '') + '" data-yr="' + y + '">' + y +
+        '</button>').join('') + '</div>' +
+      '<div class="shsec">Месяц</div><div class="chipwrap">' + RU_M_FULL.map((m, i) =>
+        '<button class="chip' +
+        (year === cur.getFullYear() && i === cur.getMonth() ? ' on' : '') +
+        '" data-mi="' + i + '">' + m + '</button>').join('') + '</div>';
+  };
+  bg.onclick = close;
+  sh.addEventListener('click', e => {
+    const y = e.target.closest('[data-yr]');
+    if (y) { year = +y.dataset.yr; draw(); return; }
+    const m = e.target.closest('[data-mi]');
+    if (!m) return;
+    const t = new Date();
+    // текущий месяц — сразу на сегодня, иначе на 1-е число
+    const key = (year === t.getFullYear() && +m.dataset.mi === t.getMonth())
+      ? today() : isoDate(new Date(year, +m.dataset.mi, 1));
+    close();
+    onPick(key);
+  });
+  bg.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+  document.body.classList.add('sheet-open');
+  document.body.appendChild(bg);
+  document.body.appendChild(sh);
+  draw();
+}
+
 function openFilterSheet(opts) {
   const bg = document.createElement('div');
   bg.className = 'sheetbg';
@@ -1837,7 +1940,7 @@ async function S_places() {
   )].sort();
   if (PL_STATE.calMode !== 'day') { PL_STATE.calMode = 'day'; PL_STATE.selKey = null; }
   if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
-  const items = calItems(PL_STATE.calMode);
+  const items = calItems(PL_STATE.calMode, PL_STATE.selKey);
   if (!items.some(it => it.key === PL_STATE.selKey)) {
     PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
   }
@@ -1857,13 +1960,15 @@ async function S_places() {
     const has = evsF().some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, it.key)));
     return '<div class="ditem' + (it.wide ? ' wide' : '') +
       (it.key === PL_STATE.selKey ? ' sel' : '') + (has ? '' : ' off') +
-      '" data-cal="' + it.key + '" data-month="' + it.month + '">' +
+      '" data-cal="' + it.key + '" data-month="' + it.month +
+      '" data-mi="' + it.mi + '" data-yr="' + it.yr + '">' +
       '<div class="dw' + (it.we ? ' we' : '') + '">' + it.dw + '</div>' +
       '<div class="dn">' + it.dn + '</div></div>';
   }).join('');
   const html =
+    '<div class="calhead" id="cal-head"><span id="ch-m"></span>' +
+    '<span class="chy" id="ch-y"></span><span class="chv">▾</span></div>' +
     '<div class="calwrap"><div class="calbar">' +
-    '<div class="calmonth" id="cal-month"></div>' +
     '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
     '<button class="calarr left" id="cal-prev">‹</button>' +
     '<button class="calarr right" id="cal-next">›</button></div>' +
@@ -1902,7 +2007,9 @@ async function S_places() {
     flLabel();
   };
   flBtn.onclick = () => openFilterSheet({
-    cities: meta.cities, types: typeOptions, people: meta.people, sel,
+    cities: meta.cities, types: typeOptions,
+    // в фильтре «кто едет» — только те, кто реально выезжает на точки
+    people: meta.people.filter(p => p.role !== 'admin' && p.role !== 'keeper'), sel,
     count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
     onClose: applyAll,
   });
@@ -1982,17 +2089,21 @@ async function S_places() {
     }
   });
   const stripEl = el.querySelector('#cal-strip');
-  const monthEl = el.querySelector('#cal-month');
   const updMonth = () => {
-    let label = '';
+    // заголовок «Месяц Год» — по дню в центре видимой части шкалы
+    const mid = stripEl.scrollLeft + stripEl.clientWidth * 0.45;
     for (const c of stripEl.children) {
-      if (c.offsetLeft - stripEl.offsetLeft + c.offsetWidth - stripEl.scrollLeft > 8) {
-        label = c.dataset.month || c.querySelector('.dw').textContent;
+      if (c.offsetLeft - stripEl.offsetLeft + c.offsetWidth > mid) {
+        el.querySelector('#ch-m').textContent = RU_M_FULL[+c.dataset.mi] || '';
+        el.querySelector('#ch-y').textContent = c.dataset.yr || '';
         break;
       }
     }
-    monthEl.textContent = label;
   };
+  el.querySelector('#cal-head').onclick = () => openMonthSheet(PL_STATE.selKey, key => {
+    PL_STATE.selKey = key;
+    render(); // шкала пересобирается вокруг выбранного месяца
+  });
   stripEl.addEventListener('scroll', () => {
     clearTimeout(stripEl._t);
     stripEl._t = setTimeout(updMonth, 80);
@@ -2035,7 +2146,9 @@ async function S_eventView(ev, meta) {
   const addr = parts[0] || '';
   const contacts = parts.slice(1);
   const row = (l, v) => '<div class="row"><div class="l hint">' + l +
-    '</div><div class="r val" style="text-align:right;max-width:60%">' + v + '</div></div>';
+    // длинный адрес переносим — иначе строка распирает экран вбок
+    '</div><div class="r val" style="text-align:right;max-width:60%;white-space:normal;' +
+    'overflow-wrap:anywhere">' + v + '</div></div>';
   const html =
     '<div class="card">' +
     '<div style="font-size:22px;font-weight:800;line-height:1.25">' + esc(ev.name) + '</div>' +
@@ -2179,22 +2292,20 @@ async function S_more() {
     seller: 'продавец' }[ME.role] || ME.role;
   const showUsers = admin || ME.role === 'keeper';
   const items = seller
-    ? [['history', '🗂', 'История моих операций']]
+    ? [['history', 'clock', 'История моих операций']]
     : [
-        ['products', '🏷', 'Номенклатура'],
-        ['prices', '💰', 'Цены продажи'],
-        ['sup', '🚛', 'Поставщики'],
-      ].concat(ownerish ? [['exp', '🧾', 'Расходы']] : [])
-      .concat([['docs', '📚', 'Документы'], ['reports', '📑', 'Отчёты']])
-      .concat(showUsers ? [['users', '👤', 'Пользователи']] : [])
-      .concat(admin ? [['set', '⚙️', 'Настройки']] : []);
-  const html = menuTiles(items) +
+        ['prices', 'tag', 'Управление ценами'],
+        ['sup', 'truck', 'Поставщики'],
+      ].concat(ownerish ? [['exp', 'card', 'Расходы']] : [])
+      .concat([['docs', 'book', 'Журнал'], ['reports', 'file', 'Отчёты']])
+      .concat(showUsers ? [['users', 'people', 'Пользователи']] : [])
+      .concat(admin ? [['set', 'gear', 'Настройки']] : []);
+  const html = menuRows(items) +
     '<div class="hint small" style="text-align:center;margin-top:16px">' +
     esc(ME.first_name + ' ' + ME.last_name) + ' • ' + roleName + '</div>';
   const el = screen('', html);
   bindMenu(el, {
     history: () => push(S_history),
-    products: () => push(S_products),
     prices: () => push(S_prices),
     reports: () => push(S_reports),
     sup: () => push(S_suppliers),
@@ -2223,7 +2334,7 @@ async function S_prices() {
     'для сохранения.</div>' +
     '<div class="field"><input id="pz-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>';
-  const el = screen('Цены продажи', html, true);
+  const el = screen('Управление ценами', html, true);
   el.querySelector('#pz-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(r => {
@@ -2258,15 +2369,20 @@ async function S_products() {
     '<div class="l"><div class="name small">' + esc(p.name) + '</div>' +
     '<div class="sub">себестоимость ' + fmtM(p.purchase_price) + ' • цена продажи ' + fmtM(p.retail_price) +
     ' • остаток ' + fmtQ(p.stock_qty, p.unit) + '</div></div><div class="r hint">›</div></div>';
-  let listHtml = '', lastGroup = null;
+  // товары по группам: тап по названию группы плавно сворачивает/раскрывает её
+  const groups = [];
   active.forEach(p => {
-    if (p.group_name !== lastGroup) {
-      lastGroup = p.group_name;
-      listHtml += '<div class="hint small" style="margin:10px 4px 2px;font-weight:700">' +
-        esc(p.group_name || 'Без группы') + '</div>';
+    const g = p.group_name || 'Без группы';
+    if (!groups.length || groups[groups.length - 1].name !== g) {
+      groups.push({ name: g, items: [] });
     }
-    listHtml += rowP(p);
+    groups[groups.length - 1].items.push(p);
   });
+  const listHtml = groups.map(g =>
+    '<div class="pgroup"><button class="pghead">' + esc(g.name) +
+    '<span class="pgarr">▾</span></button>' +
+    '<div class="pgbody"><div class="pgin">' + g.items.map(rowP).join('') +
+    '</div></div></div>').join('');
   const html =
     '<button class="btn" id="p-add">+ Добавить товар</button>' +
     '<div class="field"><input id="p-q" placeholder="Поиск…"></div>' +
@@ -2280,8 +2396,18 @@ async function S_products() {
     el.querySelectorAll('#p-list .row').forEach(r => {
       r.style.display = !q || r.textContent.toLowerCase().includes(q) ? '' : 'none';
     });
+    el.querySelectorAll('#p-list .pgroup').forEach(g => {
+      if (q) g.classList.remove('closed'); // при поиске раскрываем всё
+      const any = [...g.querySelectorAll('.row')].some(r => r.style.display !== 'none');
+      g.style.display = any ? '' : 'none';
+    });
   });
   el.addEventListener('click', e => {
+    const gh = e.target.closest('.pghead');
+    if (gh) {
+      gh.parentElement.classList.toggle('closed');
+      return;
+    }
     const c = e.target.closest('[data-pid]');
     if (c) push(S_productEdit, products.find(p => p.id === +c.dataset.pid));
   });
@@ -2479,7 +2605,7 @@ async function S_docs() {
   const chips = DOC_GROUPS.map(t =>
     '<button class="chip' + (DOCS_STATE.group === t[0] ? ' on' : '') + '" data-t="' + t[0] +
     '">' + t[1] + '</button>').join('');
-  const el = screen('Документы',
+  const el = screen('Журнал',
     '<div class="chips">' + chips + '</div>' +
     (docs.length ? docs.map(d => docCard(d, true, true)).join('')
       : '<div class="card hint">Документов в этой группе нет</div>'), true);

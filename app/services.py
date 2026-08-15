@@ -1104,11 +1104,13 @@ def sales_report(conn, date_from, date_to, share_pct):
 # ---------- мероприятия и точки ----------
 
 def people_list(conn):
-    """Список для «кто ездит»: без админа и кладовщика — они на точки не выезжают."""
-    return [{"id": r["id"], "name": f"{r['first_name']} {r['last_name']}".strip()}
+    """Короткий список активных пользователей с ролью — фронт сам решает, кого показывать
+    (фильтр «кто едет» скрывает админа и кладовщика, бронь — нет)."""
+    return [{"id": r["id"], "name": f"{r['first_name']} {r['last_name']}".strip(),
+             "role": r["role"]}
             for r in conn.execute(
-                "SELECT id, first_name, last_name FROM users"
-                " WHERE active=1 AND role NOT IN ('admin','keeper') ORDER BY first_name")]
+                "SELECT id, first_name, last_name, role FROM users"
+                " WHERE active=1 ORDER BY first_name")]
 
 
 def _owner_ok(conn, owner_user_id):
