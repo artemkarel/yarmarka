@@ -1430,8 +1430,8 @@ def products_report(conn, date_from, date_to, share_pct):
         "COALESCE(SUM(l.qty_sold * l.purchase_price),0) cogs "
         "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
         "JOIN products p ON p.id = l.product_id "
-        "WHERE d.type='sdacha' AND d.date BETWEEN ? AND ? AND l.qty_sold > ? "
-        "GROUP BY p.id ORDER BY val DESC",
+        "WHERE d.type='sdacha' AND d.status='posted' AND d.date BETWEEN ? AND ? "
+        "AND l.qty_sold > ? GROUP BY p.id ORDER BY val DESC",
         (date_from, date_to, EPS),
     ):
         share = float(r["val"]) * share_pct / 100.0
@@ -1449,6 +1449,134 @@ def products_report(conn, date_from, date_to, share_pct):
         "products": rows,
         "totals": {"kg": r2(t_qty_kg), "sold_value": r2(t_val), "profit": r2(t_profit)},
     }
+
+
+def sales_by_period(conn, date_from, date_to, share_pct, gran):
+    """Продажи по дням / неделям / месяцам: кг, оборот, наша доля."""
+    _date_ok(date_from)
+    _date_ok(date_to)
+    fmt = {"day": "%Y-%m-%d", "week": "%Y-%W", "month": "%Y-%m"}.get(gran)
+    if not fmt:
+        raise ValueError("Неизвестный период группировки")
+    rows = []
+    t_kg = t_val = 0.0
+    for r in conn.execute(
+        "SELECT strftime(?, d.date) per, MIN(d.date) d1, MAX(d.date) d2, "
+        "COALESCE(SUM(CASE WHEN p.unit='кг' THEN l.qty_sold ELSE 0 END),0) kg, "
+        "COALESCE(SUM(l.qty_sold * l.retail_price),0) val "
+        "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
+        "JOIN products p ON p.id = l.product_id "
+        "WHERE d.type='sdacha' AND d.status='posted' AND d.date BETWEEN ? AND ? "
+        "AND l.qty_sold > ? GROUP BY per ORDER BY per DESC",
+        (fmt, date_from, date_to, EPS),
+    ):
+        rows.append({"period": r["per"], "date_from": r["d1"], "date_to": r["d2"],
+                     "kg": r2(r["kg"]), "sold_value": r2(r["val"]),
+                     "our_share": r2(float(r["val"]) * share_pct / 100.0)})
+        t_kg += r["kg"]
+        t_val += r["val"]
+    return {"rows": rows,
+            "totals": {"kg": r2(t_kg), "sold_value": r2(t_val),
+                       "our_share": r2(t_val * share_pct / 100.0)}}
+
+
+def sales_by_group(conn, date_from, date_to, share_pct):
+    """Продажи по категориям (группам товаров): кг, оборот, заработок."""
+    _date_ok(date_from)
+    _date_ok(date_to)
+    rows = []
+    t_kg = t_val = t_profit = 0.0
+    for r in conn.execute(
+        "SELECT COALESCE(NULLIF(p.group_name,''),'Без группы') grp, "
+        "COALESCE(SUM(CASE WHEN p.unit='кг' THEN l.qty_sold ELSE 0 END),0) kg, "
+        "COALESCE(SUM(l.qty_sold * l.retail_price),0) val, "
+        "COALESCE(SUM(l.qty_sold * l.purchase_price),0) cogs "
+        "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
+        "JOIN products p ON p.id = l.product_id "
+        "WHERE d.type='sdacha' AND d.status='posted' AND d.date BETWEEN ? AND ? "
+        "AND l.qty_sold > ? GROUP BY grp ORDER BY val DESC",
+        (date_from, date_to, EPS),
+    ):
+        share = float(r["val"]) * share_pct / 100.0
+        profit = share - float(r["cogs"])
+        rows.append({"group": r["grp"], "kg": r2(r["kg"]), "sold_value": r2(r["val"]),
+                     "our_share": r2(share), "profit": r2(profit)})
+        t_kg += r["kg"]
+        t_val += r["val"]
+        t_profit += profit
+    return {"rows": rows,
+            "totals": {"kg": r2(t_kg), "sold_value": r2(t_val), "profit": r2(t_profit)}}
+
+
+def movement_report(conn, date_from, date_to):
+    """Движение товара по складу за период: поступления, возвраты, выдачи, списания."""
+    _date_ok(date_from)
+    _date_ok(date_to)
+    data = {}
+
+    def bucket(r):
+        return data.setdefault(r["pid"], {
+            "name": r["name"], "unit": r["unit"], "prihod": 0.0, "vozvrat": 0.0,
+            "surplus": 0.0, "vydacha": 0.0, "writeoff": 0.0, "sold": 0.0,
+        })
+
+    base = ("FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
+            "JOIN products p ON p.id = l.product_id "
+            "WHERE d.type=? AND d.status='posted' AND d.date BETWEEN ? AND ? "
+            "GROUP BY l.product_id")
+    sel = "SELECT l.product_id pid, p.name, p.unit, "
+    for dtype, key, expr in (
+        ("prihod", "prihod", "SUM(l.qty)"),
+        ("surplus", "surplus", "SUM(l.qty)"),
+        ("writeoff", "writeoff", "SUM(l.qty)"),
+        ("vydacha", "vydacha", "SUM(l.qty - l.qty_shelf)"),  # только складская часть
+    ):
+        for r in conn.execute(sel + expr + " q " + base, (dtype, date_from, date_to)):
+            bucket(r)[key] += float(r["q"] or 0)
+    for r in conn.execute(
+        sel + "SUM(l.qty_to_wh) w, SUM(l.qty_sold) s " + base,
+        ("sdacha", date_from, date_to),
+    ):
+        b = bucket(r)
+        b["vozvrat"] += float(r["w"] or 0)
+        b["sold"] += float(r["s"] or 0)
+    rows = []
+    for pid, b in data.items():
+        inn = b["prihod"] + b["vozvrat"] + b["surplus"]
+        out = b["vydacha"] + b["writeoff"]
+        if inn < EPS and out < EPS and b["sold"] < EPS:
+            continue
+        rows.append({"product_id": pid, "name": b["name"], "unit": b["unit"],
+                     "prihod": r2(b["prihod"]), "vozvrat": r2(b["vozvrat"]),
+                     "surplus": r2(b["surplus"]), "vydacha": r2(b["vydacha"]),
+                     "writeoff": r2(b["writeoff"]), "sold": r2(b["sold"]),
+                     "net": r2(inn - out)})
+    rows.sort(key=lambda x: x["name"])
+    return {"rows": rows}
+
+
+def suppliers_report(conn, date_from, date_to):
+    """Поступления по поставщикам за период: поставок, кг, себестоимость."""
+    _date_ok(date_from)
+    _date_ok(date_to)
+    rows = []
+    t_kg = t_cost = 0.0
+    for r in conn.execute(
+        "SELECT COALESCE(s.name,'Без поставщика') name, COUNT(DISTINCT d.id) n, "
+        "COALESCE(SUM(CASE WHEN p.unit='кг' THEN l.qty ELSE 0 END),0) kg, "
+        "COALESCE(SUM(l.qty * l.purchase_price),0) cost "
+        "FROM docs d JOIN doc_lines l ON l.doc_id = d.id "
+        "JOIN products p ON p.id = l.product_id "
+        "LEFT JOIN suppliers s ON s.id = d.supplier_id "
+        "WHERE d.type='prihod' AND d.status='posted' AND d.date BETWEEN ? AND ? "
+        "GROUP BY d.supplier_id ORDER BY cost DESC",
+        (date_from, date_to),
+    ):
+        rows.append({"name": r["name"], "docs": r["n"], "kg": r2(r["kg"]),
+                     "cost": r2(r["cost"])})
+        t_kg += r["kg"]
+        t_cost += r["cost"]
+    return {"rows": rows, "totals": {"kg": r2(t_kg), "cost": r2(t_cost)}}
 
 
 # ---------- напоминания ----------

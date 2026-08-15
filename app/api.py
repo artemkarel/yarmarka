@@ -675,6 +675,58 @@ def api_products_report(request: Request, date_from: str = "", date_to: str = ""
     return rep
 
 
+# ---------- отчёты ----------
+
+@app.get("/api/reports/sales_period")
+def api_rep_sales_period(request: Request, gran: str = "day",
+                         date_from: str = "", date_to: str = ""):
+    u = current_user(request)
+    need_staff(u)
+    conn = db.get()
+    st = services.settings_get(conn)
+    today = datetime.now(user_tz(u)).strftime("%Y-%m-%d")
+    rep = services.sales_by_period(conn, date_from or "2000-01-01", date_to or today,
+                                   st["share_pct"], gran)
+    if u["role"] == "keeper":
+        for r in rep["rows"]:
+            r.pop("our_share", None)
+        rep["totals"].pop("our_share", None)
+    return rep
+
+
+@app.get("/api/reports/sales_groups")
+def api_rep_sales_groups(request: Request, date_from: str = "", date_to: str = ""):
+    u = current_user(request)
+    need_staff(u)
+    conn = db.get()
+    st = services.settings_get(conn)
+    today = datetime.now(user_tz(u)).strftime("%Y-%m-%d")
+    rep = services.sales_by_group(conn, date_from or "2000-01-01", date_to or today,
+                                  st["share_pct"])
+    if u["role"] == "keeper":
+        for r in rep["rows"]:
+            r.pop("our_share", None)
+            r.pop("profit", None)
+        rep["totals"].pop("profit", None)
+    return rep
+
+
+@app.get("/api/reports/movement")
+def api_rep_movement(request: Request, date_from: str = "", date_to: str = ""):
+    u = current_user(request)
+    need_staff(u)
+    today = datetime.now(user_tz(u)).strftime("%Y-%m-%d")
+    return services.movement_report(db.get(), date_from or "2000-01-01", date_to or today)
+
+
+@app.get("/api/reports/suppliers")
+def api_rep_suppliers(request: Request, date_from: str = "", date_to: str = ""):
+    u = current_user(request)
+    need_staff(u)
+    today = datetime.now(user_tz(u)).strftime("%Y-%m-%d")
+    return services.suppliers_report(db.get(), date_from or "2000-01-01", date_to or today)
+
+
 @app.get("/api/analytics/profit")
 def api_profit(request: Request, date_from: str = "", date_to: str = ""):
     u = current_user(request)

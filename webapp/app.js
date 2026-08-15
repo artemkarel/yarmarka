@@ -169,10 +169,14 @@ function screen(title, html, sub) {
   return el;
 }
 
-// свайп слева направо — назад: экран (вместе с шапкой) едет за пальцем,
-// а под ним проглядывает предыдущий экран
+// свайп слева направо — назад: механика системного жеста iOS.
+// Экран стоит под пальцем с первого пикселя, решение о завершении — по мгновенной
+// скорости последних кадров (быстрый флик добивает всегда), доезд — со скоростью пальца.
 (function () {
   const sc = () => document.getElementById('screen');
+  const EDGE = 32;  // зона старта у левой кромки
+  const ACT = 10;   // сдвиг, после которого жест признан (тап не страдает)
+  const EASE = 'cubic-bezier(.2,.7,.3,1)';
   let t0 = null;
   let under = null;
 
@@ -184,7 +188,7 @@ function screen(title, html, sub) {
     under.id = 'screen-under';
     under.style.cssText = 'position:absolute; left:' + el.offsetLeft + 'px; width:' +
       el.offsetWidth + 'px; top:' + el.offsetTop + 'px; bottom:0; overflow:hidden; ' +
-      'z-index:0; pointer-events:none; opacity:.9; transform:translateX(-24%);';
+      'z-index:0; pointer-events:none; transform:translateX(-28%);';
     under.innerHTML = '<div style="transform:translateY(-' + (prev.scrollY || 0) + 'px)">' +
       prev.html + '</div>' +
       // затемнение нижнего экрана — рассеивается по мере свайпа, как в iOS
@@ -206,24 +210,46 @@ function screen(title, html, sub) {
     }, delay || 0);
   }
 
-  function finish(dxRaw) {
+  function setPos(tx) {
     const el = sc();
-    const dx = dxRaw || 0;
-    const dt = Date.now() - (t0.t || Date.now());
-    const speed = dt > 0 ? dx / dt : 0; // px/ms
+    el.style.transition = 'none';
+    el.style.transform = 'translateX(' + tx + 'px)';
+    if (under) {
+      const prog = Math.min(1, Math.max(0, tx / el.offsetWidth));
+      under.style.transition = 'none';
+      under.style.transform = 'translateX(' + (-28 + 28 * prog) + '%)';
+      const dim = underDim();
+      if (dim) { dim.style.transition = 'none'; dim.style.opacity = String(0.22 * (1 - prog)); }
+    }
+  }
+
+  function finish() {
+    const el = sc();
+    const st = t0;
     t0 = null;
-    const ok = dx > 70 || (dx > 30 && speed > 0.45);
-    if (ok && !backBusy) {
+    const w = el.offsetWidth || 1;
+    const tx = Math.max(0, st.tx || 0);
+    // мгновенная скорость — по хвосту траектории (последние ~90 мс)
+    let v = 0;
+    const tr = st.trail;
+    if (tr.length > 1) {
+      const a = tr[0], b = tr[tr.length - 1];
+      if (b.t > a.t) v = (b.x - a.x) / (b.t - a.t); // px/ms
+    }
+    // назад: быстрый флик — всегда; иначе треть ширины, если палец не шёл обратно
+    const go = !backBusy && (v > 0.35 || (tx > w * 0.35 && v > -0.15));
+    if (go) {
       backBusy = true;
-      // окно доезжает до конца целиком — как системный «назад» в iOS
-      el.style.transition = 'transform .24s cubic-bezier(.2,.7,.3,1)';
-      el.style.transform = 'translateX(105%)';
+      const rest = Math.max(40, w - tx);
+      // доезд продолжает скорость пальца: быстро отпустил — быстро уехал
+      const dur = Math.round(Math.max(120, Math.min(320, v > 0.2 ? rest / v : 260)));
+      el.style.transition = 'transform ' + dur + 'ms ' + EASE;
+      el.style.transform = 'translateX(102%)';
       if (under) {
-        under.style.transition = 'transform .24s cubic-bezier(.2,.7,.3,1), opacity .24s ease';
+        under.style.transition = 'transform ' + dur + 'ms ' + EASE;
         under.style.transform = 'translateX(0)';
-        under.style.opacity = '1';
         const dim = underDim();
-        if (dim) { dim.style.transition = 'opacity .24s ease'; dim.style.opacity = '0'; }
+        if (dim) { dim.style.transition = 'opacity ' + dur + 'ms ease'; dim.style.opacity = '0'; }
       }
       setTimeout(() => {
         el.style.transition = '';
@@ -235,31 +261,34 @@ function screen(title, html, sub) {
         dropUnder(40);
         backBusy = false;
         if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
-      }, 240);
+      }, dur);
     } else {
-      el.style.transition = 'transform .18s ease';
+      const dur = Math.round(Math.max(100, Math.min(220, tx * 0.9)));
+      el.style.transition = 'transform ' + dur + 'ms ease-out';
       el.style.transform = 'translateX(0)';
       if (under) {
-        under.style.transition = 'transform .18s ease, opacity .18s ease';
-        under.style.transform = 'translateX(-24%)';
+        under.style.transition = 'transform ' + dur + 'ms ease-out';
+        under.style.transform = 'translateX(-28%)';
         const dim = underDim();
-        if (dim) { dim.style.transition = 'opacity .18s ease'; dim.style.opacity = '.22'; }
+        if (dim) { dim.style.transition = 'opacity ' + dur + 'ms ease-out'; dim.style.opacity = '.22'; }
       }
-      dropUnder(200);
-      setTimeout(() => { el.style.transition = ''; el.style.transform = ''; }, 200);
+      dropUnder(dur + 30);
+      setTimeout(() => {
+        const e2 = sc();
+        if (e2) { e2.style.transition = ''; e2.style.transform = ''; }
+      }, dur + 10);
     }
   }
 
   document.addEventListener('touchstart', e => {
     t0 = null;
     if (stack.length < 2 || backBusy) return;
-    // горизонтальным лентам (календарь, чипсы) не мешаем
+    // горизонтальным лентам (календарь, чипсы) и нижним листам не мешаем
     if (e.target.closest('.dstrip, .chips, .sheet, .sheetbg')) return;
     const t = e.touches[0];
-    // жест — строго от левой кромки экрана, поверх любых элементов;
-    // обычный тап не страдает: жест включается только после уверенного сдвига
-    if (t.clientX <= 32) {
-      t0 = { x: t.clientX, y: t.clientY, drag: false, dead: false, dx: 0, t: Date.now() };
+    if (t.clientX <= EDGE) {
+      t0 = { x: t.clientX, y: t.clientY, drag: false, dead: false, tx: 0,
+        trail: [{ x: t.clientX, t: Date.now() }] };
     }
   }, { passive: true });
 
@@ -268,38 +297,33 @@ function screen(title, html, sub) {
     const t = e.touches[0];
     const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
     if (!t0.drag) {
-      if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { t0.dead = true; return; }
-      // жест признаём только при уверенном горизонтальном движении,
-      // чтобы обычный тап с лёгким сдвигом пальца оставался кликом
-      if (dx > 16 && dx > Math.abs(dy) * 1.3) t0.drag = true;
-      else return;
+      // уверенное вертикальное движение — отдаём прокрутке
+      if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx) * 1.2) { t0.dead = true; return; }
+      if (dx > ACT && dx > Math.abs(dy)) {
+        t0.drag = true;
+        if (!under) makeUnder();
+      } else return;
     }
     if (e.cancelable) e.preventDefault(); // жест наш — не отдаём его прокрутке
-    const el = sc();
-    if (!under && t0.drag) makeUnder();
-    el.style.transition = 'none';
-    el.style.transform = 'translateX(' + Math.max(0, dx) + 'px)';
-    if (under) {
-      const prog = Math.min(1, Math.max(0, dx / el.offsetWidth));
-      under.style.transform = 'translateX(' + (-24 + 24 * prog) + '%)';
-      under.style.opacity = String(0.85 + 0.15 * prog);
-      const dim = underDim();
-      if (dim) dim.style.opacity = String(0.22 * (1 - prog));
-    }
-    t0.dx = dx;
+    // сдвиг считаем от точки активации — экран трогается без скачка
+    t0.tx = Math.max(0, dx - ACT);
+    const now = Date.now();
+    t0.trail.push({ x: t.clientX, t: now });
+    while (t0.trail.length > 2 && now - t0.trail[0].t > 90) t0.trail.shift();
+    setPos(t0.tx);
   }, { passive: false });
 
   document.addEventListener('touchend', () => {
     if (!t0) return;
     if (!t0.drag) { t0 = null; return; }
-    finish(t0.dx);
+    finish();
   }, { passive: true });
 
   document.addEventListener('touchcancel', () => {
     // систему перехватило — всё равно решаем по пройденному пути
     if (!t0) return;
     if (!t0.drag) { t0 = null; return; }
-    finish(t0.dx);
+    finish();
   }, { passive: true });
 })();
 
@@ -322,10 +346,10 @@ function buildNav() {
              ['pin', 'Точки', S_places], ['chart', 'Аналитика', S_turnover],
              ['menu', 'Ещё', S_more]];
   } else if (ME.role === 'keeper') {
-    items = [['box', 'Склад', S_sklad], ['people', 'Реализация', S_sellers],
+    items = [['box', 'Склад', S_sklad], ['people', 'Реализация', S_realiz],
              ['chart', 'Аналитика', S_analytics], ['menu', 'Ещё', S_more]];
   } else {
-    items = [['box', 'Склад', S_sklad], ['people', 'Реализация', S_sellers],
+    items = [['box', 'Склад', S_sklad], ['people', 'Реализация', S_realiz],
              ['pin', 'Точки', S_places], ['chart', 'Аналитика', S_analytics],
              ['menu', 'Ещё', S_more]];
   }
@@ -355,14 +379,20 @@ function balanceHtml(b, self) {
   } else { big = 'Расчёт закрыт'; cls = ''; }
   const row = (l, v, c) => '<div class="row"><div class="l hint">' + l +
     '</div><div class="r val ' + (c || '') + '">' + v + '</div></div>';
+  // продавцу «начислено» не показываем — система считает долю внутри себя
+  const detail = self
+    ? row('Взял товара на', fmtM(b.taken_value)) +
+      row('Возврат товара', '− ' + fmtM(b.returned_credit)) +
+      row('Продал на', fmtM(b.sold_value))
+    : row('Взял товара на', fmtM(b.taken_value)) +
+      row('Продал на', fmtM(b.sold_value)) +
+      row('Начислено (' + SETTINGS.share_pct + '%)', '+ ' + fmtM(b.charged)) +
+      row('Возврат товара', '− ' + fmtM(b.returned_credit));
   return '<div class="card">' +
     '<div class="biglabel">' + big + '</div>' +
     '<div class="bignum ' + cls + '">' + fmtM(Math.abs(b.balance)) + '</div>' +
     '<div style="margin-top:10px">' +
-    row('Взял товара на', fmtM(b.taken_value)) +
-    row('Продал на', fmtM(b.sold_value)) +
-    row('Начислено (' + SETTINGS.share_pct + '%)', '+ ' + fmtM(b.charged)) +
-    row('Возврат товара', '− ' + fmtM(b.returned_credit)) +
+    detail +
     row('Терминал (пробито ' + fmtM(b.terminal_raw) + ')', '− ' + fmtM(b.terminal_credit)) +
     (Math.abs(b.cash_total) > 0.005
       ? row('Наличными', (b.cash_total >= 0 ? '− ' : '+ ') + fmtM(Math.abs(b.cash_total)))
@@ -422,6 +452,9 @@ const ROW_ICONS = {
   people: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 20c.8-3.2 3.4-5 6.5-5s5.7 1.8 6.5 5"/><circle cx="17" cy="9" r="2.6"/><path d="M16 15.2c2.6.2 4.6 1.8 5.3 4.3"/></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+  arrowup: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V6"/><path d="m6 12 6-6 6 6"/></svg>',
+  cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M3.5 9.5h17"/><path d="M8 3v4"/><path d="M16 3v4"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20v-8"/><path d="M10 20V5"/><path d="M16 20v-11"/><path d="M22 20H2"/></svg>',
 };
 
 function menuRows(items) {
@@ -807,6 +840,7 @@ async function S_sklad() {
       ['products', 'tag', 'Номенклатура'],
       ['inv', 'clipboard', 'Инвентаризация'],
       ['init', 'pencil', 'Начальные остатки'],
+      ['sup', 'truck', 'Поставщики'],
     ]) +
     '<div class="field"><input id="sk-q" placeholder="🔍 Поиск по остаткам…"></div>' +
     '<div class="card"><h3>Остатки на складе</h3>' +
@@ -819,6 +853,7 @@ async function S_sklad() {
     products: () => push(S_products),
     inv: () => push(S_invStart),
     init: () => push(S_countSheet, 'initial'),
+    sup: () => push(S_suppliers),
   });
   el.querySelector('#sk-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
@@ -1093,6 +1128,23 @@ async function S_countSheet(kind) {
 }
 
 // ===== продавцы =====
+// вкладка «Реализация» — меню в стиле склада
+async function S_realiz() {
+  const html = menuRows([
+    ['sellers', 'people', 'По сотрудникам'],
+    ['vyd', 'arrowup', 'Выдать товар'],
+    ['sd', 'arrowdown', 'Принять товар'],
+    ['prices', 'tag', 'Управление ценами'],
+  ]);
+  const el = screen('', html);
+  bindMenu(el, {
+    sellers: () => push(S_sellers),
+    vyd: () => push(S_chooseSeller, 'vydacha'),
+    sd: () => push(S_chooseSeller, 'sdacha'),
+    prices: () => push(S_prices),
+  });
+}
+
 async function S_sellers() {
   const r = await api('/api/sellers');
   const html = r.sellers.length ? r.sellers.map(s => {
@@ -1109,7 +1161,7 @@ async function S_sellers() {
       '<div class="r">' + bal + '</div></div></div>';
   }).join('')
     : '<div class="card hint">Продавцов пока нет. Они появятся после регистрации в боте.</div>';
-  const el = screen('', html);
+  const el = screen('По сотрудникам', html, true);
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-sid]');
     if (c) push(S_seller, +c.dataset.sid);
@@ -1329,6 +1381,14 @@ async function S_sdacha(sid) {
     });
     if (bad) return toast(bad + ': сумма больше, чем на руках');
     if (!lines.length) return toast('Нечего проводить');
+    // сверка кассы: инкассации в системе должны сойтись с чеками, которые принёс продавец
+    const b = info.balance || {};
+    if (!(await confirmDlg('Сверка: в системе пробито по терминалу ' +
+        fmtM(b.terminal_raw || 0) + ' (зачтено ' + fmtM(b.terminal_credit || 0) +
+        '). Сошлось с чеками, которые принёс продавец?'))) {
+      toast('Приём не проведён — сверь чеки с инкассациями');
+      return;
+    }
     try {
       const r = await api('/api/docs/sdacha', 'POST',
         { seller_id: sid, date: el.querySelector('#s-date').value, lines });
@@ -1534,6 +1594,196 @@ async function S_analytics() {
 
 // ===== отчёты =====
 async function S_reports() {
+  const html =
+    '<div class="shsec" style="margin-top:2px">Продажи</div>' +
+    menuRows([
+      ['sd', 'cal', 'Продажи по дням'],
+      ['sw', 'cal', 'Продажи по неделям'],
+      ['sm', 'cal', 'Продажи по месяцам'],
+      ['sp', 'tag', 'Продажи по товарам'],
+      ['sg', 'chart', 'Продажи по категориям'],
+    ]) +
+    '<div class="shsec">Склад</div>' +
+    menuRows([
+      ['mv', 'swap', 'Отчёт по движению'],
+      ['inv', 'clipboard', 'Отчёт об инвентаризации'],
+    ]) +
+    '<div class="shsec">Контрагенты</div>' +
+    menuRows([
+      ['sellers', 'people', 'Отчёт по продавцам'],
+      ['sup', 'truck', 'Отчёт по поставщикам'],
+    ]);
+  const el = screen('Отчёты', html, true);
+  bindMenu(el, {
+    sd: () => push(S_repPeriod, 'day'),
+    sw: () => push(S_repPeriod, 'week'),
+    sm: () => push(S_repPeriod, 'month'),
+    sp: () => push(S_repProducts),
+    sg: () => push(S_repGroups),
+    mv: () => push(S_repMovement),
+    inv: () => push(S_repInventory),
+    sellers: () => push(S_repSellers),
+    sup: () => push(S_repSuppliers),
+  });
+}
+
+// периоды отчётов живут между заходами — каждый отчёт помнит свой
+const REP_STATE = {};
+function repState(key) {
+  return REP_STATE[key] || (REP_STATE[key] = { preset: '30' });
+}
+const isOwnerish = () => ME.role === 'admin' || ME.role === 'owner';
+
+function repTotalRow(left, right) {
+  return '<div class="row total"><div class="l">' + left + '</div><div class="r">' + right +
+    '</div></div>';
+}
+
+async function S_repPeriod(gran) {
+  const titles = { day: 'Продажи по дням', week: 'Продажи по неделям',
+    month: 'Продажи по месяцам' };
+  const st = repState(gran);
+  const p = periodDates(st);
+  const chips = periodChips(st, render);
+  const rep = await api('/api/reports/sales_period?gran=' + gran +
+    '&date_from=' + p.from + '&date_to=' + p.to);
+  const label = row => {
+    if (gran === 'day') return dstr(row.period);
+    if (gran === 'month') {
+      const [y, m] = row.period.split('-');
+      return RU_M_FULL[+m - 1] + ' ' + y;
+    }
+    const mon = startOfWeek(new Date(row.date_from + 'T00:00:00'));
+    return dstr(isoDate(mon)) + ' – ' + dstr(isoDate(addDays(mon, 6)));
+  };
+  const rows = rep.rows.map(r =>
+    '<div class="row"><div class="l"><div class="name small">' + label(r) + '</div>' +
+    '<div class="sub">' + fmtQ(r.kg, 'кг') +
+    (r.our_share != null ? ' • доля ' + fmtM(r.our_share) : '') + '</div></div>' +
+    '<div class="r val">' + fmtM(r.sold_value) + '</div></div>').join('');
+  const html = chips.html +
+    '<div class="card">' + (rows
+      ? rows + repTotalRow('Итого: ' + fmtQ(rep.totals.kg, 'кг'), fmtM(rep.totals.sold_value))
+      : '<div class="hint small">Продаж за период нет</div>') + '</div>';
+  const el = screen(titles[gran], html, true);
+  chips.bind(el);
+}
+
+async function S_repProducts() {
+  const st = repState('prod');
+  const p = periodDates(st);
+  const chips = periodChips(st, render);
+  const rep = await api('/api/analytics/products?date_from=' + p.from + '&date_to=' + p.to);
+  const own = isOwnerish();
+  const prods = own ? [...rep.products].sort((a, b) => b.profit - a.profit) : rep.products;
+  const rows = prods.map((pp, i) =>
+    '<div class="row"><div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' +
+    esc(pp.name) + '</div><div class="sub">' + fmtQ(pp.qty, pp.unit) + ' • продано ' +
+    fmtM(pp.sold_value) + (own ? ' • доля ' + fmtM(pp.our_share) : '') + '</div></div>' +
+    '<div class="r">' + (own
+      ? '<div class="val ' + (pp.profit >= 0 ? 'green' : 'red') + '">' + fmtM(pp.profit) +
+        '</div><div class="sub hint">заработали</div>'
+      : '<div class="val">' + fmtM(pp.sold_value) + '</div>') + '</div></div>').join('');
+  const html = chips.html +
+    '<div class="card">' + (rows
+      ? rows + repTotalRow('Итого: ' + fmtQ(rep.totals.kg, 'кг'),
+          fmtM(own ? rep.totals.profit : rep.totals.sold_value))
+      : '<div class="hint small">Продаж за период нет</div>') + '</div>';
+  const el = screen('Продажи по товарам', html, true);
+  chips.bind(el);
+}
+
+async function S_repGroups() {
+  const st = repState('grp');
+  const p = periodDates(st);
+  const chips = periodChips(st, render);
+  const rep = await api('/api/reports/sales_groups?date_from=' + p.from + '&date_to=' + p.to);
+  const own = isOwnerish();
+  const rows = rep.rows.map((g, i) =>
+    '<div class="row"><div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' +
+    esc(g.group) + '</div><div class="sub">' + fmtQ(g.kg, 'кг') + ' • продано ' +
+    fmtM(g.sold_value) + (own && g.our_share != null ? ' • доля ' + fmtM(g.our_share) : '') +
+    '</div></div>' +
+    '<div class="r">' + (own && g.profit != null
+      ? '<div class="val ' + (g.profit >= 0 ? 'green' : 'red') + '">' + fmtM(g.profit) +
+        '</div><div class="sub hint">заработали</div>'
+      : '<div class="val">' + fmtM(g.sold_value) + '</div>') + '</div></div>').join('');
+  const html = chips.html +
+    '<div class="card">' + (rows
+      ? rows + repTotalRow('Итого: ' + fmtQ(rep.totals.kg, 'кг'),
+          fmtM(own && rep.totals.profit != null ? rep.totals.profit : rep.totals.sold_value))
+      : '<div class="hint small">Продаж за период нет</div>') + '</div>';
+  const el = screen('Продажи по категориям', html, true);
+  chips.bind(el);
+}
+
+async function S_repMovement() {
+  const st = repState('mv');
+  const p = periodDates(st);
+  const chips = periodChips(st, render);
+  const rep = await api('/api/reports/movement?date_from=' + p.from + '&date_to=' + p.to);
+  const part = (l, v, u) => (v > 0.0005 ? l + ' ' + fmtQ(v, u) : '');
+  const rows = rep.rows.map((r, i) => {
+    const sub = [part('поступление', r.prihod, r.unit), part('возврат', r.vozvrat, r.unit),
+      part('оприходовано', r.surplus, r.unit), part('выдано', r.vydacha, r.unit),
+      part('списано', r.writeoff, r.unit), part('продано', r.sold, r.unit)]
+      .filter(Boolean).join(' • ');
+    return '<div class="row"><div class="l" style="flex:1"><div class="name small">' +
+      (i + 1) + '. ' + esc(r.name) + '</div><div class="sub">' + sub + '</div></div>' +
+      '<div class="r"><div class="val ' + (r.net > 0.0005 ? 'green' : r.net < -0.0005 ? 'red' : '') +
+      '">' + (r.net > 0 ? '+' : '') + fmtQ(r.net, r.unit) +
+      '</div><div class="sub hint">склад</div></div></div>';
+  }).join('');
+  const html = chips.html +
+    '<div class="card hint small">Справа — изменение складского остатка за период.</div>' +
+    '<div class="card">' + (rows || '<div class="hint small">Движения за период нет</div>') +
+    '</div>';
+  const el = screen('Отчёт по движению', html, true);
+  chips.bind(el);
+}
+
+async function S_repSellers() {
+  const st = repState('sel');
+  const p = periodDates(st);
+  const chips = periodChips(st, render);
+  const rep = await api('/api/analytics/sales?date_from=' + p.from + '&date_to=' + p.to);
+  const rows = rep.sellers.length ? rep.sellers.map(s =>
+    '<details class="doc"><summary><div class="dochead"><div><b>' + esc(s.name) + '</b></div>' +
+    '<div class="dt">' + fmtM(s.sold_value) + '</div></div>' +
+    '<div class="sub hint small">' +
+    (s.sold_kg > 0 ? fmtQ(s.sold_kg, 'кг') + ' • ' : '') +
+    'наша доля ' + fmtM(s.our_share) + ' • терминал ' + fmtM(s.terminal_credit) +
+    (s.cash ? ' • нал ' + fmtM(s.cash) : '') + '</div></summary>' +
+    '<div class="doclines small">' + s.products.map(pp =>
+      '<div class="row small"><div class="l">' + esc(pp.name) + '</div><div class="r">' +
+      fmtQ(pp.qty, pp.unit) + ' • ' + fmtM(pp.value) + '</div></div>').join('') +
+    '</div></details>').join('')
+    : '<div class="card hint">Продаж за период нет</div>';
+  const html = chips.html + rows;
+  const el = screen('Отчёт по продавцам', html, true);
+  chips.bind(el);
+}
+
+async function S_repSuppliers() {
+  const st = repState('sup');
+  const p = periodDates(st);
+  const chips = periodChips(st, render);
+  const rep = await api('/api/reports/suppliers?date_from=' + p.from + '&date_to=' + p.to);
+  const rows = rep.rows.map((r, i) =>
+    '<div class="row"><div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' +
+    esc(r.name) + '</div><div class="sub">поставок: ' + r.docs + ' • ' + fmtQ(r.kg, 'кг') +
+    '</div></div>' +
+    '<div class="r"><div class="val">' + fmtM(r.cost) +
+    '</div><div class="sub hint">себестоимость</div></div></div>').join('');
+  const html = chips.html +
+    '<div class="card">' + (rows
+      ? rows + repTotalRow('Итого: ' + fmtQ(rep.totals.kg, 'кг'), fmtM(rep.totals.cost))
+      : '<div class="hint small">Поступлений за период нет</div>') + '</div>';
+  const el = screen('Отчёт по поставщикам', html, true);
+  chips.bind(el);
+}
+
+async function S_repInventory() {
   const r = await api('/api/docs?type=inventory&limit=100');
   const html = r.docs.length
     ? '<div class="card">' + r.docs.map((d, i) =>
@@ -1544,7 +1794,7 @@ async function S_reports() {
       '">' + fmtM(d.amount) + '</div></div>').join('') + '</div>'
     : '<div class="card hint">Отчётов пока нет — проведи инвентаризацию, и здесь появится ' +
       'отчёт о расхождениях.</div>';
-  const el = screen('Отчёты', html, true);
+  const el = screen('Отчёт об инвентаризации', html, true);
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-rep]');
     if (c) push(S_invReport, +c.dataset.rep);
@@ -1649,7 +1899,7 @@ const E_TYPES = ['Праздник', 'Ярмарка', 'Фестиваль', 'Д
 function ownerLine(x) {
   return x.owner_name
     ? '👤 ездит: <b>' + esc(x.owner_name) + '</b>'
-    : '<span class="green">точка свободна</span>';
+    : '<span class="green">свободно</span>';
 }
 
 function bookingsLine(x) {
@@ -1717,7 +1967,7 @@ function bookBtnHtml(x, attr) {
     const info = bk.user_name + ', ' + dstr(bk.date_from) +
       (bk.date_to !== bk.date_from ? ' – ' + dstr(bk.date_to) : '');
     return '<button class="bookbtn booked" data-unbook="' + bk.id + '" data-bkinfo="' +
-      esc(info) + '">Забронировано</button>';
+      esc(info) + '">Снять бронь</button>';
   }
   return '<button class="bookbtn" ' + attr + '="' + x.id + '">Забронировать</button>';
 }
@@ -1841,22 +2091,10 @@ function openFilterSheet(opts) {
     '<button class="chip' + (on ? ' on' : '') + '" data-' + attr + '="' + esc(String(val)) +
     '">' + esc(label) + '</button>';
   const draw = () => {
-    const cityQ = (sh.querySelector('#sh-cq') || {}).value || '';
-    const q = cityQ.toLowerCase().trim();
-    // без запроса показываем только выбранные города; при вводе — подсказки
-    const cityChips = q
-      ? opts.cities.filter(c => c.toLowerCase().includes(q)).slice(0, 12)
-      : opts.sel.citySel.slice();
+    // город здесь не выбирается — он ищется в основной строке поиска
     sh.innerHTML =
       '<div class="sheethandle"></div>' +
       '<h3 style="margin-bottom:10px">Фильтры</h3>' +
-      '<div class="shsec">Город</div>' +
-      '<div class="field"><input id="sh-cq" placeholder="Введите город…" value="' +
-      esc(cityQ) + '" autocomplete="off"></div>' +
-      (cityChips.length
-        ? '<div class="chipwrap">' + cityChips.map(c =>
-            chip('shc', c, c, opts.sel.citySel.includes(c))).join('') + '</div>'
-        : (q ? '<div class="hint small">Город не найден</div>' : '')) +
       '<div class="shsec">Вид</div><div class="chipwrap">' +
       opts.types.map(t => chip('sht', t, t, opts.sel.typeSel.includes(t))).join('') + '</div>' +
       '<div class="shsec">Кто едет</div><div class="chipwrap">' +
@@ -1867,14 +2105,6 @@ function openFilterSheet(opts) {
       '<button class="btn secondary" id="sh-reset" style="margin:0">Сбросить</button>' +
       '<button class="btn" id="sh-show" style="margin:0">Показать (' + opts.count() +
       ')</button></div>';
-    const cq = sh.querySelector('#sh-cq');
-    cq.addEventListener('input', () => {
-      const pos = cq.selectionStart;
-      draw();
-      const cq2 = sh.querySelector('#sh-cq');
-      cq2.focus();
-      cq2.setSelectionRange(pos, pos);
-    });
   };
   const close = () => {
     document.body.classList.remove('sheet-open');
@@ -1883,26 +2113,20 @@ function openFilterSheet(opts) {
   bg.onclick = close;
   sh.addEventListener('click', e => {
     if (e.target.id === 'sh-reset') {
-      opts.sel.citySel.length = 0;
       opts.sel.typeSel.length = 0;
       opts.sel.whoSel.length = 0;
       draw();
       return;
     }
     if (e.target.id === 'sh-show') { close(); return; }
-    const c = e.target.closest('[data-shc]');
     const t = e.target.closest('[data-sht]');
     const w = e.target.closest('[data-shw]');
-    if (!c && !t && !w) return;
-    const arr = c ? opts.sel.citySel : t ? opts.sel.typeSel : opts.sel.whoSel;
-    let val = c ? c.dataset.shc : t ? t.dataset.sht : w.dataset.shw;
+    if (!t && !w) return;
+    const arr = t ? opts.sel.typeSel : opts.sel.whoSel;
+    let val = t ? t.dataset.sht : w.dataset.shw;
     if (w && val !== 'free') val = +val;
     const i = arr.indexOf(val);
     if (i >= 0) arr.splice(i, 1); else arr.push(val);
-    if (c && i < 0) {
-      const cq = sh.querySelector('#sh-cq');
-      if (cq) cq.value = ''; // город выбран из подсказок — очищаем поиск
-    }
     draw();
   });
   bg.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
@@ -1927,12 +2151,11 @@ async function S_places() {
       (x.city || '').toLowerCase().includes(q) ||
       (x.address || '').toLowerCase().includes(q);
   };
+  sel.citySel.length = 0; // город фильтруется только основной строкой поиска
   const evMatch = ev =>
-    (!sel.citySel.length || sel.citySel.includes(ev.city)) &&
     (!sel.typeSel.length || sel.typeSel.includes(ev.etype || 'Другое')) &&
     whoMatch(ev, sel.whoSel) && textMatch(ev);
   const ptMatch = pt =>
-    (!sel.citySel.length || sel.citySel.includes(pt.city)) &&
     (!sel.typeSel.length || sel.typeSel.includes(pt.ptype || 'Другое')) &&
     whoMatch(pt, sel.whoSel) && textMatch(pt);
   const typeOptions = [...new Set(
@@ -1955,7 +2178,7 @@ async function S_places() {
           'ТОЧКИ</div>' + ptListHtml(pts)
         : '');
   };
-  const nActive = () => sel.citySel.length + sel.typeSel.length + sel.whoSel.length;
+  const nActive = () => sel.typeSel.length + sel.whoSel.length;
   const strip = items.map(it => {
     const has = evsF().some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, it.key)));
     return '<div class="ditem' + (it.wide ? ' wide' : '') +
@@ -2007,7 +2230,7 @@ async function S_places() {
     flLabel();
   };
   flBtn.onclick = () => openFilterSheet({
-    cities: meta.cities, types: typeOptions,
+    types: typeOptions,
     // в фильтре «кто едет» — только те, кто реально выезжает на точки
     people: meta.people.filter(p => p.role !== 'admin' && p.role !== 'keeper'), sel,
     count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
@@ -2126,7 +2349,7 @@ async function S_places() {
 
 function ownerSelect(id, meta, current) {
   return '<div class="field"><label>Кто туда ездит</label><select id="' + id + '">' +
-    '<option value="">— точка свободна —</option>' +
+    '<option value="">— свободно —</option>' +
     meta.people.map(pp => '<option value="' + pp.id + '"' +
       (current === pp.id ? ' selected' : '') + '>' + esc(pp.name) + '</option>').join('') +
     '</select></div>';
@@ -2157,7 +2380,7 @@ async function S_eventView(ev, meta) {
     row('📅 Даты', dates) +
     (addr ? row('📍 Площадка', esc(addr)) : '') +
     row('👤 Кто ездит', ev.owner_name ? esc(ev.owner_name)
-      : '<span class="green">точка свободна</span>') +
+      : '<span class="green">свободно</span>') +
     (contacts.length
       ? '<div class="hint small" style="margin-top:8px">' + esc(contacts.join(' • ')) + '</div>'
       : '') +
@@ -2293,10 +2516,7 @@ async function S_more() {
   const showUsers = admin || ME.role === 'keeper';
   const items = seller
     ? [['history', 'clock', 'История моих операций']]
-    : [
-        ['prices', 'tag', 'Управление ценами'],
-        ['sup', 'truck', 'Поставщики'],
-      ].concat(ownerish ? [['exp', 'card', 'Расходы']] : [])
+    : (ownerish ? [['exp', 'card', 'Расходы']] : [])
       .concat([['docs', 'book', 'Журнал'], ['reports', 'file', 'Отчёты']])
       .concat(showUsers ? [['users', 'people', 'Пользователи']] : [])
       .concat(admin ? [['set', 'gear', 'Настройки']] : []);
@@ -2306,9 +2526,7 @@ async function S_more() {
   const el = screen('', html);
   bindMenu(el, {
     history: () => push(S_history),
-    prices: () => push(S_prices),
     reports: () => push(S_reports),
-    sup: () => push(S_suppliers),
     docs: () => push(S_docs),
     users: () => push(S_users),
     exp: () => push(S_expenses),
