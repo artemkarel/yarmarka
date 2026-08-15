@@ -17,7 +17,8 @@ from app import db, services  # noqa: E402
 
 CITIES = {"msk": "Москва", "spb": "Санкт-Петербург", "ekb": "Екатеринбург",
           "nnv": "Нижний Новгород", "kzn": "Казань"}
-CATS = {"festival": "Фестиваль", "holiday": "Праздник"}
+CATS = {"festival": "Фестиваль", "holiday": "Праздник",
+        "yarmarki-razvlecheniya-yarmarki": "Ярмарка коммерческая"}
 API = "https://kudago.com/public-api/v1.4/events/"
 
 

@@ -2364,7 +2364,6 @@ async function S_map(opts) {
     return;
   }
   const sel = PL_STATE;
-  const t = today();
   const typeOptions = [...new Set(
     allEvents.map(x => x.etype || 'Другое').concat(allPoints.map(x => x.ptype || 'Другое'))
   )].sort();
@@ -2375,17 +2374,44 @@ async function S_map(opts) {
   const match = x =>
     (!sel.typeSel.length || sel.typeSel.includes((x.etype || x.ptype) || 'Другое')) &&
     whoMatch(x, sel.whoSel) && textMatch(x);
+  // тот же календарь и период, что в ленте точек
+  if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey('day');
+  const items = calItems('day', PL_STATE.selKey);
+  if (!items.some(it => it.key === PL_STATE.selKey)) PL_STATE.selKey = calDefaultKey('day');
+  const perNow = () => PL_STATE.yearAll
+    ? { from: PL_STATE.yearAll + '-01-01', to: PL_STATE.yearAll + '-12-31' }
+    : calPeriod('day', PL_STATE.selKey);
+  let per = perNow();
+  const strip = items.map(it =>
+    '<div class="ditem' + (it.key === PL_STATE.selKey ? ' sel' : '') +
+    '" data-cal="' + it.key + '" data-month="' + it.month +
+    '" data-mi="' + it.mi + '" data-yr="' + it.yr + '">' +
+    '<div class="dw' + (it.we ? ' we' : '') + '">' + it.dw + '</div>' +
+    '<div class="dn">' + it.dn + '</div></div>').join('');
   const html =
-    '<div class="searchrow"><span class="sico">🔍</span>' +
-    '<input id="mp-q" placeholder="Поиск на карте…" autocomplete="off" value="' +
-    esc(sel.q || '') + '">' +
-    '<button id="fl-open" title="Фильтры">' +
-    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
+    '<div class="calheadrow">' +
+    '<div class="calhead" id="cal-head"><span id="ch-m"></span>' +
+    '<span class="chy" id="ch-y"></span><span class="chv">▾</span></div></div>' +
+    '<div class="calwrap"><div class="calbar">' +
+    '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
+    '<button class="calarr left" id="cal-prev">‹</button>' +
+    '<button class="calarr right" id="cal-next">›</button></div>' +
+    '<div class="iconrow">' +
+    '<button class="iconbtn' + (sel.q ? ' on' : '') + '" id="mp-q-btn" title="Поиск">' +
+    '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>' +
+    '<path d="m20 20-3.8-3.8"/></svg></button>' +
+    '<button class="iconbtn" id="fl-open" title="Фильтры">' +
+    '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"' +
     ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
     '<path d="M3.5 8h17M3.5 16h17"/>' +
     '<circle cx="10" cy="8" r="3.1" fill="currentColor" stroke="none"/>' +
     '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
     '<span id="fl-n"></span></button></div>' +
+    '<div class="searchrow" id="mp-qrow"' + (sel.q ? '' : ' hidden') + '>' +
+    '<span class="sico">🔍</span>' +
+    '<input id="mp-q" placeholder="Поиск на карте…" autocomplete="off" value="' +
+    esc(sel.q || '') + '"></div>' +
     '<div id="map-box"></div>' +
     '<div class="hint small" style="margin-top:8px" id="mp-count"></div>';
   const el = screen('Карта событий', html, true);
@@ -2448,14 +2474,15 @@ async function S_map(opts) {
   let focusPending = opts.focusCity || null;
   const redraw = () => {
     layer.clearLayers();
-    // на карте — будущие события + постоянные точки, с теми же фильтрами
-    const items = allEvents
-      .filter(ev => (ev.date_to || ev.date_from) >= t)
+    per = perNow();
+    // на карте — события выбранного периода + постоянные точки, фильтры как в ленте
+    const mapItems = allEvents
+      .filter(ev => evIntersects(ev, per))
       .filter(match).map(x => ({ ...x, kind: 'event' }))
       .concat(allPoints.filter(match).map(x => ({ ...x, kind: 'point' })));
     const byCity = {};
     let located = 0;
-    items.forEach(x => {
+    mapItems.forEach(x => {
       const g = MAP_GEO[x.city];
       if (!g) return;
       (byCity[x.city] = byCity[x.city] || []).push(x);
@@ -2491,7 +2518,7 @@ async function S_map(opts) {
     types: typeOptions,
     people: meta.people.filter(p => p.role !== 'admin' && p.role !== 'keeper'),
     sel,
-    count: () => allEvents.filter(ev => (ev.date_to || ev.date_from) >= t).filter(match)
+    count: () => allEvents.filter(ev => evIntersects(ev, perNow())).filter(match)
       .concat(allPoints.filter(match)).length,
     onClose: redraw,
   });
@@ -2500,6 +2527,67 @@ async function S_map(opts) {
     clearTimeout(qInp._t);
     qInp._t = setTimeout(() => { sel.q = qInp.value; redraw(); }, 250);
   });
+  el.querySelector('#mp-q-btn').onclick = () => {
+    const row = el.querySelector('#mp-qrow');
+    row.hidden = !row.hidden;
+    el.querySelector('#mp-q-btn').classList.toggle('on', !row.hidden || !!sel.q);
+    if (!row.hidden) qInp.focus();
+  };
+
+  // календарь: те же жесты и выбор, что в ленте точек
+  const stripEl = el.querySelector('#cal-strip');
+  const updMonth = () => {
+    if (PL_STATE.yearAll) {
+      el.querySelector('#ch-m').textContent = 'Весь';
+      el.querySelector('#ch-y').textContent = String(PL_STATE.yearAll);
+      return;
+    }
+    const mid = stripEl.scrollLeft + stripEl.clientWidth * 0.45;
+    for (const c of stripEl.children) {
+      if (c.offsetLeft - stripEl.offsetLeft + c.offsetWidth > mid) {
+        el.querySelector('#ch-m').textContent = RU_M_FULL[+c.dataset.mi] || '';
+        el.querySelector('#ch-y').textContent = c.dataset.yr || '';
+        break;
+      }
+    }
+  };
+  stripEl.addEventListener('scroll', () => {
+    clearTimeout(stripEl._t);
+    stripEl._t = setTimeout(updMonth, 80);
+  });
+  stripEl.addEventListener('click', e => {
+    const c = e.target.closest('[data-cal]');
+    if (!c) return;
+    PL_STATE.yearAll = null;
+    PL_STATE.selKey = c.dataset.cal;
+    stripEl.querySelectorAll('.ditem').forEach(d =>
+      d.classList.toggle('sel', d.dataset.cal === c.dataset.cal));
+    updMonth();
+    redraw();
+  });
+  el.querySelector('#cal-prev').onclick = () => {
+    stripEl.scrollLeft -= stripEl.clientWidth * 0.8;
+  };
+  el.querySelector('#cal-next').onclick = () => {
+    stripEl.scrollLeft += stripEl.clientWidth * 0.8;
+  };
+  el.querySelector('#cal-head').onclick = () => openMonthSheet(PL_STATE.selKey, (key, yr) => {
+    if (yr) {
+      PL_STATE.yearAll = yr;
+    } else {
+      PL_STATE.yearAll = null;
+      PL_STATE.selKey = key;
+    }
+    render(); // шкала пересобирается вокруг выбранного
+  });
+  const selItem = stripEl.querySelector('.ditem.sel');
+  if (selItem) {
+    stripEl.style.scrollBehavior = 'auto';
+    selItem.scrollIntoView({ inline: 'center', block: 'nearest' });
+    stripEl.style.scrollBehavior = '';
+    window.scrollTo(0, 0);
+  }
+  updMonth();
   setTimeout(() => { map.invalidateSize(); redraw(); }, 60);
 }
 

@@ -251,7 +251,7 @@ body.sheet-open{ overflow:hidden; }
 .iconbtn #fl-n:empty{ display:none; }
 #map-open{ color:var(--accent); }
 
-#map-box{ height:calc(100vh - 300px); min-height:320px; border-radius:18px;
+#map-box{ height:calc(100vh - 430px); min-height:300px; border-radius:18px;
   overflow:hidden; background:var(--card); }
 .citypin{ background:var(--accent); color:#fff; border-radius:50%; display:flex;
   align-items:center; justify-content:center; font-weight:800; font-size:13px;
