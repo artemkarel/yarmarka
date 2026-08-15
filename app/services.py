@@ -1170,9 +1170,19 @@ _PLACE_SELECT = (
     "LEFT JOIN users c ON c.id = t.created_by"
 )
 
+# списки гоняются на телефон целиком — отдаём только используемые фронтом поля
+_PLACE_LIST_SELECT = (
+    "SELECT {cols}, o.first_name || ' ' || o.last_name AS owner_name "
+    "FROM {table} t LEFT JOIN users o ON o.id = t.owner_user_id"
+)
+_EVENT_COLS = ("t.id, t.name, t.etype, t.city, t.date_from, t.date_to, "
+               "t.owner_user_id, t.comment, t.created_by")
+_POINT_COLS = ("t.id, t.name, t.ptype, t.city, t.address, t.phone, t.email, "
+               "t.owner_user_id, t.comment, t.created_by")
+
 
 def events_list(conn, city=None, when="upcoming", today=None):
-    q = _PLACE_SELECT.format(table="events") + " WHERE 1=1"
+    q = _PLACE_LIST_SELECT.format(cols=_EVENT_COLS, table="events") + " WHERE 1=1"
     args = []
     if city:
         q += " AND t.city = ?"
@@ -1231,7 +1241,7 @@ def event_delete(conn, user, event_id):
 
 
 def points_list(conn, ptype=None, city=None, today=None):
-    q = _PLACE_SELECT.format(table="points") + " WHERE 1=1"
+    q = _PLACE_LIST_SELECT.format(cols=_POINT_COLS, table="points") + " WHERE 1=1"
     args = []
     if ptype:
         q += " AND t.ptype = ?"

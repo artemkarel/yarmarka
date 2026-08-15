@@ -9,6 +9,7 @@ import hashlib
 import hmac as hmac_lib
 
 from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +35,23 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Ярмарка", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
+
+@app.middleware("http")
+async def cache_headers(request: Request, call_next):
+    """API не кэшируется; версионированная статика (?v=) — кэшируется намертво."""
+    resp = await call_next(request)
+    p = request.url.path
+    if p.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store"
+    elif "v" in request.query_params:
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif p.startswith("/vendor/") or p.endswith((".png", ".jpg", ".svg", ".webp")):
+        resp.headers["Cache-Control"] = "public, max-age=604800"
+    elif p.endswith((".html", "/")):
+        resp.headers.setdefault("Cache-Control", "no-cache, must-revalidate")
+    return resp
 
 
 @app.exception_handler(ValueError)
@@ -192,8 +210,8 @@ def api_product_update(pid: int, request: Request, payload: dict = Body(...)):
     conn = db.get()
     fields = {k: payload[k] for k in ("name", "unit", "purchase_price", "retail_price",
                                       "archived", "group_name") if k in payload}
-    old = services.products_list(conn, include_archived=True)
-    old_price = next((p["retail_price"] for p in old if p["id"] == pid), None)
+    old = conn.execute("SELECT retail_price FROM products WHERE id=?", (pid,)).fetchone()
+    old_price = old["retail_price"] if old else None
     product = services.product_update(conn, pid, **fields)
     # смена цены продажи фиксируется журнальным документом
     if ("retail_price" in fields and old_price is not None

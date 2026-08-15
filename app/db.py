@@ -1,11 +1,17 @@
-"""SQLite: соединение и схема."""
+"""SQLite: соединения и схема.
+
+Соединение — на каждый поток своё (threading.local): одно общее соединение
+между потоками сегфолтит CPython при параллельных чтениях. WAL даёт
+многопоточное чтение без блокировок, записи сериализует services._lock.
+"""
 import sqlite3
 import threading
 
 from . import config
 
-_conn = None
-_conn_lock = threading.Lock()
+_local = threading.local()
+_init_lock = threading.Lock()
+_schema_ready = False
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -125,19 +131,37 @@ CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 """
 
 
+def _connect():
+    conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    # PRAGMA-настройки действуют на соединение — ставим каждому
+    conn.execute("PRAGMA foreign_keys=ON")
+    # WAL позволяет ослабить fsync без риска потери целостности
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA cache_size=-8000")   # 8 МБ страничного кэша
+    conn.execute("PRAGMA temp_store=MEMORY")
+    # mmap не включаем: при смене процессов (деплой) он даёт ложные
+    # «database disk image is malformed» на чтении, а выгоды при базе
+    # в несколько МБ нет — страничный кэш и так держит её целиком
+    return conn
+
+
 def get():
-    global _conn
-    with _conn_lock:
-        if _conn is None:
+    global _schema_ready
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        with _init_lock:
             config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
-            _conn.row_factory = sqlite3.Row
-            _conn.execute("PRAGMA journal_mode=WAL")
-            _conn.execute("PRAGMA foreign_keys=ON")
-            _conn.executescript(SCHEMA)
-            _migrate(_conn)
-            _conn.commit()
-    return _conn
+            conn = _connect()
+            if not _schema_ready:
+                conn.executescript(SCHEMA)
+                _migrate(conn)
+                conn.commit()
+                _schema_ready = True
+        _local.conn = conn
+    return conn
 
 
 def _migrate(conn):

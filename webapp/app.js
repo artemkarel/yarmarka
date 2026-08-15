@@ -97,6 +97,20 @@ async function getProducts(force) {
   return PRODUCTS_CACHE;
 }
 
+// данные ленты точек: три запроса одним залпом + кэш, чтобы вкладка открывалась мгновенно.
+// Любое изменение события/точки/брони сбрасывает кэш (PL_CACHE = null).
+let PL_CACHE = null;
+const PL_TTL = 60000; // через минуту данные считаются устаревшими и перечитываются
+async function placesData(force) {
+  if (!PL_CACHE || force || Date.now() - PL_CACHE.t > PL_TTL) {
+    const [meta, ev, pt] = await Promise.all([
+      api('/api/places/meta'), api('/api/events?when=all'), api('/api/points'),
+    ]);
+    PL_CACHE = { meta: meta, events: ev.events, points: pt.points, t: Date.now() };
+  }
+  return PL_CACHE;
+}
+
 // ===== навигация =====
 let stack = [];
 let ANIM = null; // push | backin | tab — анимация ближайшей отрисовки экрана
@@ -2120,6 +2134,7 @@ function bookingBlock(el, kind, refId, meta, ev) {
         date_to: fixed ? fixed.to : box.querySelector('#bk-to').value,
       });
       toast('Забронировано ✓', true);
+      PL_CACHE = null;
       drawList();
     } catch (e) { toast(e.message); }
   };
@@ -2127,8 +2142,11 @@ function bookingBlock(el, kind, refId, meta, ev) {
     const d = e.target.closest('[data-bdel]');
     if (!d) return;
     if (!(await confirmDlg('Снять бронь?'))) return;
-    try { await api('/api/bookings/' + d.dataset.bdel, 'DELETE'); drawList(); }
-    catch (err) { toast(err.message); }
+    try {
+      await api('/api/bookings/' + d.dataset.bdel, 'DELETE');
+      PL_CACHE = null;
+      drawList();
+    } catch (err) { toast(err.message); }
   });
 }
 
@@ -2351,13 +2369,14 @@ function loadLeaflet() {
 async function S_map(opts) {
   opts = opts || {};
   if (!MAP_GEO) MAP_GEO = (await api('/api/geo')).geo;
-  const meta = opts.meta || (await api('/api/places/meta'));
+  let meta = opts.meta;
   let allEvents = opts.events;
   let allPoints = opts.points;
-  if (!allEvents || !allPoints) {
-    const [er, pr] = await Promise.all([api('/api/events?when=all'), api('/api/points')]);
-    allEvents = er.events;
-    allPoints = pr.points;
+  if (!meta || !allEvents || !allPoints) {
+    const d = await placesData();
+    meta = meta || d.meta;
+    allEvents = allEvents || d.events;
+    allPoints = allPoints || d.points;
   }
   try {
     await loadLeaflet();
@@ -2648,12 +2667,10 @@ function openFilterSheet(opts) {
 }
 
 async function S_places() {
-  const meta = await api('/api/places/meta');
-  const [evResp, ptResp] = await Promise.all([
-    api('/api/events?when=all'), api('/api/points'),
-  ]);
-  let allEvents = evResp.events;
-  let allPoints = ptResp.points;
+  const data = await placesData();
+  const meta = data.meta;
+  let allEvents = data.events;
+  let allPoints = data.points;
   const sel = PL_STATE; // citySel / typeSel / whoSel живут в состоянии вкладки
   const textQ = () => (PL_STATE.q || '').toLowerCase().trim();
   const textMatch = x => {
@@ -2694,8 +2711,9 @@ async function S_places() {
         : '');
   };
   const nActive = () => sel.typeSel.length + sel.whoSel.length;
+  const evsNow = evsF(); // один прогон фильтра на всю шкалу, а не по разу на ячейку
   const strip = items.map(it => {
-    const has = evsF().some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, it.key)));
+    const has = evsNow.some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, it.key)));
     return '<div class="ditem' + (it.wide ? ' wide' : '') +
       (it.key === PL_STATE.selKey ? ' sel' : '') + (has ? '' : ' off') +
       '" data-cal="' + it.key + '" data-month="' + it.month +
@@ -2758,8 +2776,9 @@ async function S_places() {
     per = perNow();
     el.querySelector('#pl-list').innerHTML = listBlock();
     const stripEl = el.querySelector('#cal-strip');
+    const evs = evsF();
     for (const c of stripEl.children) {
-      const has = evsF().some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, c.dataset.cal)));
+      const has = evs.some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, c.dataset.cal)));
       c.classList.toggle('off', !has);
     }
     flLabel();
@@ -2795,8 +2814,9 @@ async function S_places() {
       try {
         await api('/api/bookings/' + ub.dataset.unbook, 'DELETE');
         toast('Бронь снята ✓', true);
-        allEvents = (await api('/api/events?when=all')).events;
-        allPoints = (await api('/api/points')).points;
+        const d = await placesData(true);
+        allEvents = d.events;
+        allPoints = d.points;
         applyAll();
       } catch (err) { toast(err.message); }
       return;
@@ -2813,7 +2833,9 @@ async function S_places() {
           kind: 'event', ref_id: ev.id, user_id: ME.id, date_from: from, date_to: to,
         });
         toast('Забронировано ✓', true);
-        allEvents = (await api('/api/events?when=all')).events;
+        const d = await placesData(true);
+        allEvents = d.events;
+        allPoints = d.points;
         applyAll();
       } catch (err) { toast(err.message); }
       return;
@@ -2834,7 +2856,9 @@ async function S_places() {
           date_to: f.querySelector('.bkf-to').value,
         });
         toast('Забронировано ✓', true);
-        allPoints = (await api('/api/points')).points;
+        const d = await placesData(true);
+        allEvents = d.events;
+        allPoints = d.points;
         applyAll();
       } catch (err) { toast(err.message); }
       return;
@@ -2994,14 +3018,19 @@ async function S_eventEdit(ev, meta) {
         comment: el.querySelector('#ee-comment').value,
       });
       toast('Сохранено ✓', true);
+      PL_CACHE = null;
       back();
     } catch (e) { toast(e.message); }
   };
   const del = el.querySelector('#ee-del');
   if (del) del.onclick = async () => {
     if (!(await confirmDlg('Удалить мероприятие?'))) return;
-    try { await api('/api/events/' + ev.id, 'DELETE'); toast('Удалено', true); back(); }
-    catch (e) { toast(e.message); }
+    try {
+      await api('/api/events/' + ev.id, 'DELETE');
+      toast('Удалено', true);
+      PL_CACHE = null;
+      back();
+    } catch (e) { toast(e.message); }
   };
 }
 
@@ -3065,14 +3094,19 @@ async function S_pointEdit(pt, meta, scrollToBooking) {
         comment: el.querySelector('#po-comment').value,
       });
       toast('Сохранено ✓', true);
+      PL_CACHE = null;
       back();
     } catch (e) { toast(e.message); }
   };
   const del = el.querySelector('#po-del');
   if (del) del.onclick = async () => {
     if (!(await confirmDlg('Удалить точку?'))) return;
-    try { await api('/api/points/' + pt.id, 'DELETE'); toast('Удалено', true); back(); }
-    catch (e) { toast(e.message); }
+    try {
+      await api('/api/points/' + pt.id, 'DELETE');
+      toast('Удалено', true);
+      PL_CACHE = null;
+      back();
+    } catch (e) { toast(e.message); }
   };
 }
 

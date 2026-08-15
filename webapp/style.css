@@ -203,7 +203,9 @@ details.doc .doclines{ padding:0 14px 12px; }
 .tilebtn .tico{ display:block; font-size:25px; margin-bottom:8px; }
 .tilebtn:active{ transform:scale(.96); }
 
-.place{ position:relative; }
+.place{ position:relative;
+  /* карточки за экраном не рендерятся — длинные списки (весь год) листаются легко */
+  content-visibility:auto; contain-intrinsic-size:auto 130px; }
 .infoico{ color:var(--accent); margin-left:6px; font-size:14px; opacity:.85; }
 .telbtn{ border:none; background:transparent; color:var(--accent); font-weight:700;
   font-size:inherit; cursor:pointer; padding:0; text-decoration:underline; }
