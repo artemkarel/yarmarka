@@ -209,6 +209,8 @@ details.doc .doclines{ padding:0 14px 12px; }
 .infoico{ color:var(--accent); margin-left:6px; font-size:14px; opacity:.85; }
 .telbtn{ border:none; background:transparent; color:var(--accent); font-weight:700;
   font-size:inherit; cursor:pointer; padding:0; text-decoration:underline; }
+.citylink{ color:var(--accent); font-weight:700; text-decoration:underline;
+  cursor:pointer; }
 .place .pl-main{ min-width:0; }
 .place .plfoot{ padding-right:96px; }
 .bookbtn{ position:absolute; right:12px; bottom:12px; border:none; background:var(--accent);

@@ -19,3 +19,9 @@ WEBAPP_DIR = ROOT / "webapp"
 # ИИ-помощник: без ключа отвечает данными из базы; с ключом Anthropic — полноценный LLM
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-haiku-4-5-20251001")
+
+# Мессенджер MAX: токен бота от МастерБота (dev.max.ru); пусто = MAX выключен
+MAX_BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "").strip()
+MAX_API_BASE = os.getenv("MAX_API_BASE", "https://botapi.max.ru").rstrip("/")
+# пользователи MAX живут в общей таблице users со сдвигом id — без пересечений с Telegram
+MAX_UID_OFFSET = 2_000_000_000_000

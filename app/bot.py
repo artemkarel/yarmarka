@@ -13,9 +13,18 @@ log = logging.getLogger("bot")
 
 
 def send_sync(chat_id, text):
-    """Уведомление из API-обработчиков: отправляем в фоне, ошибки не роняют запрос."""
-    if not config.BOT_TOKEN or not chat_id or chat_id < 0:
-        return  # отрицательные id — пользователи, заведённые вручную без Telegram
+    """Уведомление из API-обработчиков: отправляем в фоне, ошибки не роняют запрос.
+
+    Единая точка отправки: id со сдвигом MAX_UID_OFFSET уходят в мессенджер MAX,
+    остальные — в Telegram."""
+    if not chat_id or chat_id < 0:
+        return  # отрицательные id — пользователи, заведённые вручную без мессенджера
+    if chat_id >= config.MAX_UID_OFFSET:
+        from . import max_bot
+        max_bot.send_sync(chat_id - config.MAX_UID_OFFSET, text)
+        return
+    if not config.BOT_TOKEN:
+        return
 
     def _go():
         try:
@@ -120,7 +129,11 @@ async def reminders_loop(bot):
                 if services.incass_exists(conn, u["id"], ldate):
                     services.mark_reminded(conn, u["id"], ldate)
                     continue
-                await bot.send(u["tg_id"], REMIND_TEXT, reply_markup=_open_button())
+                if u["tg_id"] >= config.MAX_UID_OFFSET:
+                    from . import max_bot
+                    await max_bot.send(u["tg_id"] - config.MAX_UID_OFFSET, REMIND_TEXT)
+                else:
+                    await bot.send(u["tg_id"], REMIND_TEXT, reply_markup=_open_button())
                 services.mark_reminded(conn, u["id"], ldate)
                 log.info("reminder sent to %s", u["tg_id"])
         except asyncio.CancelledError:

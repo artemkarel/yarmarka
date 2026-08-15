@@ -13,7 +13,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, bot, config, db, services
+from . import auth, bot, config, db, max_bot, services
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("api")
@@ -27,6 +27,10 @@ async def lifespan(_app):
         tasks.append(asyncio.create_task(bot.run(bot.Bot(config.BOT_TOKEN))))
     else:
         log.warning("BOT_TOKEN не задан — бот и напоминания выключены")
+    if config.MAX_BOT_TOKEN:
+        tasks.append(asyncio.create_task(max_bot.run()))
+    else:
+        log.info("MAX_BOT_TOKEN не задан — бот MAX выключен")
     if config.DEV_MODE:
         log.warning("DEV_MODE=1 — включён вход без Telegram (не для боевого сервера!)")
     yield
@@ -64,7 +68,7 @@ def _err(code, msg):
 
 
 def tg_identity(request: Request):
-    """Личность Telegram из initData (или dev-заголовка в DEV_MODE)."""
+    """Личность из initData мини-аппа: Telegram или MAX (или dev-заголовок в DEV_MODE)."""
     if config.DEV_MODE:
         dev = request.headers.get("X-Dev-User")
         if dev:
@@ -73,7 +77,16 @@ def tg_identity(request: Request):
             except ValueError:
                 raise _err(401, "Некорректный X-Dev-User")
             return {"id": did, "first_name": f"Dev{did}", "username": f"dev{did}"}
-    tg = auth.validate_init_data(request.headers.get("X-Tg-Init-Data", ""), config.BOT_TOKEN)
+    raw = request.headers.get("X-Tg-Init-Data", "")
+    if raw.startswith("max "):  # мини-приложение внутри MAX — id со сдвигом
+        mu = auth.validate_max_init_data(raw[4:], config.MAX_BOT_TOKEN)
+        if not mu:
+            raise _err(401, "Откройте приложение через MAX")
+        return {"id": config.MAX_UID_OFFSET + int(mu["id"]),
+                "first_name": mu.get("first_name", ""),
+                "last_name": mu.get("last_name", ""),
+                "username": mu.get("username")}
+    tg = auth.validate_init_data(raw, config.BOT_TOKEN)
     if not tg:
         raise _err(401, "Откройте приложение через Telegram")
     return tg

@@ -1,7 +1,16 @@
-/* Ярмарка — мини-приложение Telegram */
+/* Ярмарка — мини-приложение Telegram и MAX */
 'use strict';
 
 const tg = window.Telegram && window.Telegram.WebApp;
+// мини-приложение внутри мессенджера MAX (MAX Bridge даёт window.WebApp)
+const maxApp = (!tg || !tg.initData) && window.WebApp && window.WebApp.initData
+  ? window.WebApp : null;
+// кнопка «назад» есть в обоих мессенджерах — берём ту, что доступна
+const BB = (tg && tg.BackButton) || (maxApp && maxApp.BackButton) || null;
+function backBtn(show) {
+  if (!BB) return;
+  try { if (show) BB.show(); else BB.hide(); } catch (e) { /* мост без show/hide */ }
+}
 const qsp = new URLSearchParams(location.search);
 const DEV = qsp.get('dev');
 
@@ -74,6 +83,7 @@ function confirmDlg(msg) {
 async function api(path, method, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (DEV) headers['X-Dev-User'] = DEV;
+  else if (maxApp) headers['X-Tg-Init-Data'] = 'max ' + maxApp.initData;
   else headers['X-Tg-Init-Data'] = (tg && tg.initData) || '';
   const r = await fetch(path, {
     method: method || 'GET', headers,
@@ -118,7 +128,7 @@ let ANIM = null; // push | backin | tab — анимация ближайшей 
 function render() {
   const top = stack[stack.length - 1];
   top.fn.apply(null, top.args);
-  if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
+  backBtn(stack.length > 1);
 }
 let RESTORE_Y = null; // прокрутка, которую надо вернуть после «назад»
 
@@ -154,7 +164,7 @@ function back() {
   }, 190);
 }
 window.back = back;
-if (tg) tg.BackButton.onClick(back);
+if (BB && BB.onClick) BB.onClick(back);
 
 // клавиатура не должна мешать: прокрутка списка или Enter закрывают её
 // клавиатуру прячем сразу на касании вне поля — чтобы жест «назад» не тратился
@@ -2961,7 +2971,9 @@ async function S_eventView(ev, meta) {
     '<div class="card">' +
     '<div style="font-size:22px;font-weight:800;line-height:1.25">' + esc(ev.name) + '</div>' +
     '<div class="sub hint" style="margin:6px 0 10px">' +
-    [esc(ev.etype), esc(ev.city)].filter(Boolean).join(' • ') + '</div>' +
+    [esc(ev.etype), ev.city
+      ? '<span class="citylink" id="ev-city">📍 ' + esc(ev.city) + '</span>' : '']
+      .filter(Boolean).join(' • ') + '</div>' +
     row('📅 Даты', dates) +
     (addr ? row('📍 Площадка', esc(addr)) : '') +
     row('👤 Кто ездит', ev.owner_name ? esc(ev.owner_name)
@@ -2975,12 +2987,12 @@ async function S_eventView(ev, meta) {
       : '') +
     '</div>' +
     '<div class="card" id="bk-box"></div>' +
-    '<button class="btn secondary" id="ev-map">🗺 Посмотреть на карте</button>' +
     '<button class="btn secondary" id="ev-edit">✏️ Редактировать</button>';
   const el = screen('Мероприятие', html, true);
   bookingBlock(el, 'event', ev.id, meta, ev);
-  // карта открывается внутри приложения, сразу на городе мероприятия
-  el.querySelector('#ev-map').onclick = () => push(S_map, { focusCity: ev.city, meta: meta });
+  // тап по городу в шапке открывает карту сразу на этом городе
+  const cl = el.querySelector('#ev-city');
+  if (cl) cl.onclick = () => push(S_map, { focusCity: ev.city, meta: meta });
   el.querySelector('#ev-edit').onclick = () => push(S_eventEdit, ev, meta);
 }
 
@@ -3594,7 +3606,8 @@ async function S_users() {
       (u.active ? '' : ' <span class="red">(откл.)</span>') +
       '</div><div class="sub">' +
       (u.username ? '@' + esc(u.username)
-        : (u.tg_id > 0 ? 'id ' + u.tg_id : 'создан вручную, без Telegram')) +
+        : (u.tg_id > 0 ? 'id ' + u.tg_id : 'создан вручную, без мессенджера')) +
+      (u.platform === 'MAX' ? ' • MAX' : '') +
       ' • ' + (roleTitle[u.role] || u.role) +
       (seenStr(u.last_seen)
         ? '<br>заходил(а): ' + seenStr(u.last_seen)
@@ -3730,11 +3743,17 @@ async function boot() {
       tg.onEvent('contentSafeAreaChanged', applyInsets);
     }
   }
-  if (!DEV && !(tg && tg.initData)) {
+  if (maxApp) {
+    // мост MAX частично повторяет Telegram API — вызываем то, что он умеет
+    try { if (maxApp.ready) maxApp.ready(); } catch (e) { /* нет метода */ }
+    try { if (maxApp.expand) maxApp.expand(); } catch (e) { /* нет метода */ }
+  }
+  if (!DEV && !(tg && tg.initData) && !maxApp) {
     screen('', '<div class="card" style="text-align:center;padding:40px 20px">' +
       '<div style="font-size:40px;margin-bottom:10px">🛒</div>' +
-      '<b>Это мини-приложение Telegram</b>' +
-      '<div class="hint" style="margin-top:8px">Открой его через бота в Telegram.</div></div>');
+      '<b>Это мини-приложение для мессенджера</b>' +
+      '<div class="hint" style="margin-top:8px">Открой его через бота в Telegram ' +
+      'или MAX.</div></div>');
     return;
   }
   try {

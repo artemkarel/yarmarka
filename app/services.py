@@ -10,7 +10,7 @@
 import threading
 from datetime import datetime, timezone
 
-from . import db
+from . import config, db
 
 EPS = 1e-6
 ROLES = ("seller", "keeper", "owner", "admin")
@@ -104,7 +104,11 @@ def user_touch(conn, uid, username, tz):
 
 
 def users_list(conn):
-    return [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY role, first_name")]
+    rows = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY role, first_name")]
+    for r in rows:
+        r["platform"] = ("MAX" if r["tg_id"] >= config.MAX_UID_OFFSET
+                         else "TG" if r["tg_id"] > 0 else "")
+    return rows
 
 
 def adopt_manual(conn, tg_user):
