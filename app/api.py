@@ -601,6 +601,18 @@ def api_places_meta(request: Request):
     return {"cities": services.places_cities(conn), "people": services.people_list(conn)}
 
 
+@app.post("/api/assistant")
+def api_assistant(request: Request, payload: dict = Body(...)):
+    """Чат-помощник: куда поехать, что свободно — по базе мероприятий."""
+    u = current_user(request)
+    need_not_keeper(u)
+    msgs = payload.get("messages") or []
+    if not msgs:
+        raise _err(400, "Пустой запрос")
+    today = datetime.now(user_tz(u)).strftime("%Y-%m-%d")
+    return {"reply": services.assistant_reply(db.get(), u, msgs, today)}
+
+
 @app.post("/api/broadcast")
 def api_broadcast(request: Request, payload: dict = Body(...)):
     """Рассылка сотрудникам в Telegram от админа/совладельца."""

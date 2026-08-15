@@ -1621,6 +1621,228 @@ def suppliers_report(conn, date_from, date_to):
     return {"rows": rows, "totals": {"kg": r2(t_kg), "cost": r2(t_cost)}}
 
 
+# ---------- ИИ-помощник ----------
+
+_AM = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6, "июл": 7,
+       "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12}
+
+
+def _asst_month(word):
+    w = word.lower()
+    for pref, num in sorted(_AM.items(), key=lambda x: -len(x[0])):
+        if w.startswith(pref):
+            return num
+    return None
+
+
+def _asst_parse(conn, text, today):
+    """Из вопроса достаём период, город и тип события."""
+    import re as _re
+    from datetime import date as _date, timedelta as _td
+    low = " " + text.lower().replace("ё", "е") + " "
+    t = _date.fromisoformat(today)
+    d1 = d2 = None
+    label = ""
+    if "послезавтра" in low:
+        d1 = d2 = t + _td(days=2)
+        label = "послезавтра"
+    elif "завтра" in low:
+        d1 = d2 = t + _td(days=1)
+        label = "завтра"
+    elif "сегодня" in low:
+        d1 = d2 = t
+        label = "сегодня"
+    elif "выходн" in low or "субботу" in low or "воскресень" in low:
+        sat = t + _td(days=(5 - t.weekday()) % 7)
+        d1, d2 = sat, sat + _td(days=1)
+        label = "в ближайшие выходные"
+    elif "месяц" in low:
+        d1, d2 = t, t + _td(days=30)
+        label = "в ближайший месяц"
+    elif "недел" in low:
+        d1, d2 = t, t + _td(days=7)
+        label = "на этой неделе"
+    m = _re.search(r"(\d{1,2})[.](\d{1,2})(?:[.](\d{2,4}))?", low)
+    if m and not d1:
+        y = int(m.group(3) or t.year)
+        if y < 100:
+            y += 2000
+        try:
+            d1 = d2 = _date(y, int(m.group(2)), int(m.group(1)))
+            label = d1.strftime("%d.%m")
+        except ValueError:
+            pass
+    m = _re.search(r"(\d{1,2})\s+([а-я]+)", low)
+    if m and not d1:
+        mn = _asst_month(m.group(2))
+        if mn:
+            try:
+                d1 = d2 = _date(t.year, mn, int(m.group(1)))
+                label = d1.strftime("%d.%m")
+            except ValueError:
+                pass
+    def month_word(w):
+        """Строгое распознавание месяца: «магазин»/«магадан» — не май."""
+        if w in ("май", "мае", "мая"):
+            return 5
+        strict = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "июн": 6, "июл": 7,
+                  "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12}
+        for pref, num in strict.items():
+            if w.startswith(pref) and len(w) <= len(pref) + 2:
+                return num
+        return None
+
+    if not d1:
+        # месяц без числа: «в сентябре» — весь месяц
+        import calendar as _cal
+        for w in _re.findall(r"[а-я]{3,}", low):
+            mn = month_word(w)
+            if mn:
+                y = t.year if mn >= t.month else t.year + 1
+                d1 = _date(y, mn, 1)
+                d2 = _date(y, mn, _cal.monthrange(y, mn)[1])
+                label = "в " + ["январе", "феврале", "марте", "апреле", "мае", "июне",
+                                "июле", "августе", "сентябре", "октябре", "ноябре",
+                                "декабре"][mn - 1]
+                break
+    if not d1:
+        d1, d2 = t, t + _td(days=14)
+        label = "в ближайшие две недели"
+
+    # город: слова вопроса против списка городов из базы
+    cities = [r["c"] for r in conn.execute(
+        "SELECT DISTINCT city c FROM events WHERE city != '' "
+        "UNION SELECT DISTINCT city FROM points WHERE city != ''")]
+    city = None
+    words = _re.findall(r"[а-яе-]{4,}", low)
+    stop = {"ярмарк", "ярмарка", "ярмарки", "город", "города", "мероприят", "поехать",
+            "можно", "куда", "какие", "есть", "недел", "выходные", "сельхоз", "фестивал"}
+    for w in sorted(words, key=len, reverse=True):
+        if any(w.startswith(s) for s in stop) or month_word(w):
+            continue
+        # пробуем самое длинное совпадение: «казани» → «казан» → Казань, не Казаково
+        for cut in (0, 1, 2, 3):
+            base = w[:len(w) - cut]
+            if len(base) < 4:
+                break
+            hits = [c for c in cities
+                    if c.lower().replace("ё", "е").startswith(base)]
+            if hits:
+                city = min(hits, key=len)  # самое короткое имя = самое точное
+                break
+        if city:
+            break
+
+    etypes = None
+    tlabel = ""
+    if "коммерч" in low or "выстав" in low:
+        etypes, tlabel = ["Ярмарка коммерческая"], "коммерческие ярмарки"
+    elif "сельхоз" in low:
+        etypes, tlabel = ["Сельхозярмарка"], "сельхозярмарки"
+    elif "фестивал" in low:
+        etypes, tlabel = ["Фестиваль"], "фестивали"
+    elif "день города" in low or "дни городов" in low or "деревн" in low or "села" in low:
+        etypes, tlabel = ["День города/села"], "дни городов"
+    elif "праздник" in low:
+        etypes, tlabel = ["Праздник"], "праздники"
+    elif "ярмарк" in low:
+        etypes, tlabel = ["Сельхозярмарка", "Ярмарка коммерческая"], "ярмарки"
+    return d1.isoformat(), d2.isoformat(), city, etypes, label, tlabel
+
+
+def _asst_events(conn, d1, d2, city, etypes, limit=15):
+    q = ("SELECT e.*, u.first_name || ' ' || u.last_name owner_name "
+         "FROM events e LEFT JOIN users u ON u.id = e.owner_user_id "
+         "WHERE e.date_from <= ? AND COALESCE(e.date_to, e.date_from) >= ?")
+    args = [d2, d1]
+    if city:
+        q += " AND e.city = ?"
+        args.append(city)
+    if etypes:
+        q += " AND e.etype IN (%s)" % ",".join("?" * len(etypes))
+        args.extend(etypes)
+    # события с точными датами интереснее «годовых» площадок — они выше
+    q += (" ORDER BY CASE WHEN julianday(COALESCE(e.date_to, e.date_from)) - "
+          "julianday(e.date_from) > 45 THEN 1 ELSE 0 END, e.date_from LIMIT ?")
+    args.append(limit)
+    out = []
+    for e in conn.execute(q, args):
+        booked = conn.execute(
+            "SELECT u.first_name || ' ' || u.last_name n FROM bookings b "
+            "JOIN users u ON u.id = b.user_id "
+            "WHERE b.kind='event' AND b.ref_id=? LIMIT 1", (e["id"],)).fetchone()
+        out.append({**dict(e), "busy": (booked["n"] if booked else e["owner_name"])})
+    return out
+
+
+def _asst_format(events, label, city, tlabel):
+    where = f" (город: {city})" if city else ""
+    what = tlabel or "мероприятия"
+    if not events:
+        return (f"{label[:1].upper()}{label[1:]}{where} — {what} в базе не нашлись. "
+                "Попробуй другой период или город, например: «куда поехать в выходные?»")
+
+    def fd(s):
+        return f"{s[8:10]}.{s[5:7]}"
+
+    lines = []
+    for e in events:
+        dts = fd(e["date_from"])
+        if e["date_to"] and e["date_to"] != e["date_from"]:
+            dts += "–" + fd(e["date_to"])
+        status = f"занято: {e['busy']}" if e["busy"] else "свободно"
+        lines.append(f"• {dts} · {e['name']} ({e['city']}) — {status}")
+    head = f"Вот {what} {label}{where}:"
+    tail = "\n\nОткрыть детали и забронировать можно во вкладке «Точки», карта — кнопкой «Карта»."
+    return head + "\n" + "\n".join(lines) + tail
+
+
+def _asst_llm(messages, ctx_text, today):
+    import httpx as _httpx
+    from app import config as _cfg
+    sys_prompt = (
+        "Ты — помощник команды выездной розничной торговли Yoggu (драже, вяленые ягоды, "
+        f"сладости). Сегодня {today}. Команда ездит по ярмаркам, фестивалям и праздникам "
+        "и продаёт товар с точек. Отвечай кратко, по-русски, дружелюбно. Ниже — данные из "
+        "базы мероприятий приложения, найденные по вопросу. Отвечай ТОЛЬКО по этим данным, "
+        "не выдумывай события; если данных мало — скажи прямо и предложи, как "
+        "переформулировать. Даты пиши как дд.мм.\n\nДанные:\n" + ctx_text)
+    msgs = [{"role": m["role"], "content": str(m.get("content", ""))[:2000]}
+            for m in messages[-12:] if m.get("role") in ("user", "assistant")]
+    r = _httpx.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": _cfg.ANTHROPIC_API_KEY,
+                 "anthropic-version": "2023-06-01"},
+        json={"model": _cfg.ASSISTANT_MODEL, "max_tokens": 700,
+              "system": sys_prompt, "messages": msgs},
+        timeout=30)
+    r.raise_for_status()
+    return "".join(b.get("text", "") for b in r.json().get("content", []))
+
+
+def assistant_reply(conn, user, messages, today):
+    from app import config as _cfg
+    question = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            question = str(m.get("content", ""))
+            break
+    d1, d2, city, etypes, label, tlabel = _asst_parse(conn, question, today)
+    events = _asst_events(conn, d1, d2, city, etypes)
+    base = _asst_format(events, label, city, tlabel)
+    if _cfg.ANTHROPIC_API_KEY:
+        try:
+            ctx = "\n".join(
+                f"{e['date_from']}..{e['date_to'] or e['date_from']} | {e['etype']} | "
+                f"{e['name']} | {e['city']} | "
+                f"{'занято: ' + e['busy'] if e['busy'] else 'свободно'}"
+                for e in events) or "(по запросу ничего не найдено)"
+            return _asst_llm(messages, ctx, today)
+        except Exception:  # noqa: BLE001 — LLM недоступен, отвечаем данными
+            return base
+    return base
+
+
 # ---------- напоминания ----------
 
 def hands_nonzero(conn, seller_id):

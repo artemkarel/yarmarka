@@ -2261,6 +2261,56 @@ function openMonthSheet(selKey, onPick) {
   draw();
 }
 
+// ===== ИИ-помощник: чат про поездки, города и мероприятия =====
+const AI_STATE = { msgs: [] }; // история живёт, пока открыто приложение
+
+async function S_aiChat() {
+  const html =
+    '<div id="chat-log"></div>' +
+    '<div class="chatbar"><input id="chat-in" placeholder="Куда поехать в выходные?"' +
+    ' autocomplete="off">' +
+    '<button id="chat-send" aria-label="Отправить">' +
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 3 10 14"/><path d="M21 3 14 21l-4-7-7-4Z"/></svg></button></div>';
+  const el = screen('Помощник', html, true);
+  const log = el.querySelector('#chat-log');
+  const inp = el.querySelector('#chat-in');
+  const bubble = (m, i) =>
+    '<div class="msg ' + (m.role === 'user' ? 'me' : 'bot') + '">' +
+    esc(m.content).replace(/\n/g, '<br>') + '</div>';
+  const draw = typing => {
+    const msgs = AI_STATE.msgs.length ? AI_STATE.msgs : [{
+      role: 'assistant',
+      content: 'Привет! Я помогаю спланировать поездки. Спроси, например:\n' +
+        '• Куда поехать в выходные?\n• Какие ярмарки в Казани в сентябре?\n' +
+        '• Какие дни городов на этой неделе свободны?',
+    }];
+    log.innerHTML = msgs.map(bubble).join('') +
+      (typing ? '<div class="msg bot typing">…</div>' : '');
+    window.scrollTo(0, document.body.scrollHeight);
+  };
+  const send = async () => {
+    const text = inp.value.trim();
+    if (!text) return;
+    inp.value = '';
+    AI_STATE.msgs.push({ role: 'user', content: text });
+    draw(true);
+    try {
+      const r = await api('/api/assistant', 'POST', { messages: AI_STATE.msgs });
+      AI_STATE.msgs.push({ role: 'assistant', content: r.reply });
+    } catch (e) {
+      AI_STATE.msgs.push({ role: 'assistant', content: 'Не получилось ответить: ' + e.message });
+    }
+    draw(false);
+  };
+  el.querySelector('#chat-send').onclick = send;
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); send(); }
+  });
+  draw(false);
+}
+
 // ===== карта событий (Leaflet + OSM, грузится только при открытии) =====
 let LEAFLET_P = null;
 let MAP_GEO = null;
@@ -2540,23 +2590,31 @@ async function S_places() {
       '<div class="dn">' + it.dn + '</div></div>';
   }).join('');
   const html =
+    '<div class="calheadrow">' +
     '<div class="calhead" id="cal-head"><span id="ch-m"></span>' +
     '<span class="chy" id="ch-y"></span><span class="chv">▾</span></div>' +
+    '<button class="aibtn" id="ai-open">✨ Помощник</button></div>' +
     '<div class="calwrap"><div class="calbar">' +
     '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
     '<button class="calarr left" id="cal-prev">‹</button>' +
     '<button class="calarr right" id="cal-next">›</button></div>' +
-    '<div class="searchrow"><span class="sico">🔍</span>' +
-    '<input id="pl-q" placeholder="Поиск точек и мероприятий…" autocomplete="off" value="' +
-    esc(PL_STATE.q || '') + '">' +
-    '<button id="map-open" title="Карта событий">Карта</button>' +
-    '<button id="fl-open" title="Фильтры">' +
-    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
+    '<div class="iconrow">' +
+    '<button class="iconbtn' + (PL_STATE.q ? ' on' : '') + '" id="pl-q-btn" title="Поиск">' +
+    '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>' +
+    '<path d="m20 20-3.8-3.8"/></svg></button>' +
+    '<button class="iconbtn" id="fl-open" title="Фильтры">' +
+    '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"' +
     ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
     '<path d="M3.5 8h17M3.5 16h17"/>' +
     '<circle cx="10" cy="8" r="3.1" fill="currentColor" stroke="none"/>' +
     '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
-    '<span id="fl-n"></span></button></div>' +
+    '<span id="fl-n"></span></button>' +
+    '<button class="iconbtn" id="map-open" title="Карта событий">Карта</button></div>' +
+    '<div class="searchrow" id="pl-qrow"' + (PL_STATE.q ? '' : ' hidden') + '>' +
+    '<span class="sico">🔍</span>' +
+    '<input id="pl-q" placeholder="Поиск точек и мероприятий…" autocomplete="off" value="' +
+    esc(PL_STATE.q || '') + '"></div>' +
     '<div class="addline"><span data-add="event">+ мероприятие</span>' +
     '<span data-add="point">+ точка</span></div>' +
     '<div id="pl-list">' + listBlock() + '</div>';
@@ -2571,6 +2629,13 @@ async function S_places() {
     clearTimeout(qInp._t);
     qInp._t = setTimeout(() => { PL_STATE.q = qInp.value; applyAll(); }, 250);
   });
+  // лупа раскрывает и прячет строку поиска
+  el.querySelector('#pl-q-btn').onclick = () => {
+    const row = el.querySelector('#pl-qrow');
+    row.hidden = !row.hidden;
+    el.querySelector('#pl-q-btn').classList.toggle('on', !row.hidden || !!PL_STATE.q);
+    if (!row.hidden) qInp.focus();
+  };
   const applyAll = () => {
     per = perNow();
     el.querySelector('#pl-list').innerHTML = listBlock();
@@ -2589,6 +2654,7 @@ async function S_places() {
     onClose: applyAll,
   });
   el.querySelector('#map-open').onclick = () => push(S_map, allEvents, allPoints, meta);
+  el.querySelector('#ai-open').onclick = () => push(S_aiChat);
   el.addEventListener('click', async e => {
     const add = e.target.closest('[data-add]');
     if (add) {

@@ -16,3 +16,6 @@ PORT = int(os.getenv("PORT", "8077"))
 DB_PATH = Path(os.getenv("DB_PATH", str(ROOT / "data" / "yarmarka.db")))
 REMIND_HOUR = int(os.getenv("REMIND_HOUR", "20"))
 WEBAPP_DIR = ROOT / "webapp"
+# ИИ-помощник: без ключа отвечает данными из базы; с ключом Anthropic — полноценный LLM
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-haiku-4-5-20251001")
