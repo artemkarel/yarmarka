@@ -2086,9 +2086,9 @@ function calItems(mode, selKey) {
 function evIntersects(ev, p) {
   return ev.date_from <= p.to && (ev.date_to || ev.date_from) >= p.from;
 }
-const P_TYPES = ['Праздник', 'Рынок', 'ТЦ', 'Сеть', 'Магазин', 'Другое'];
+const P_TYPES = ['Праздник', 'Рынок', 'ТЦ', 'Сеть', 'Магазин', 'Маркет', 'Другое'];
 const E_TYPES = ['Праздник', 'Сельхозярмарка', 'Ярмарка коммерческая', 'Фестиваль',
-  'Другое'];
+  'Маркет', 'Другое'];
 
 function ownerLine(x) {
   return x.owner_name
