@@ -251,6 +251,22 @@ body.sheet-open{ overflow:hidden; }
   min-width:15px; height:15px; line-height:15px; text-align:center; }
 .searchrow button #fl-n:empty{ display:none; }
 
+/* ряд «пилюль» над лентой и картой: лупа, Фильтры, Тип события, Карта */
+.pillrow{ display:flex; gap:6px; margin-bottom:10px; align-items:center;
+  overflow-x:auto; scrollbar-width:none; }
+.pillrow::-webkit-scrollbar{ display:none; }
+.pill{ flex:none; display:flex; align-items:center; gap:6px; border:none;
+  background:var(--card); color:var(--text); border-radius:13px; padding:10px 11px;
+  font-size:13.5px; font-weight:600; cursor:pointer; transition:transform .12s ease; }
+.pill:active{ transform:scale(.96); }
+.pill.on{ color:var(--accent); box-shadow:inset 0 0 0 1.5px var(--accent); }
+.pill .pv{ opacity:.65; font-size:11.5px; }
+.pill .pilln{ background:var(--accent); color:var(--accent-text); border-radius:99px;
+  font-size:11px; min-width:17px; height:17px; display:inline-flex; align-items:center;
+  justify-content:center; padding:0 4px; }
+.pill .pilln:empty{ display:none; }
+.pill.mappill{ margin-left:auto; color:var(--accent); font-weight:700; }
+
 .iconrow{ display:flex; gap:8px; margin-bottom:10px; }
 .iconbtn{ flex:1; display:flex; align-items:center; justify-content:center; gap:6px;
   background:var(--card); border:none; border-radius:14px; padding:12px; cursor:pointer;

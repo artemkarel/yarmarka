@@ -2427,18 +2427,7 @@ async function S_map(opts) {
     '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
     '<button class="calarr left" id="cal-prev">‹</button>' +
     '<button class="calarr right" id="cal-next">›</button></div>' +
-    '<div class="iconrow">' +
-    '<button class="iconbtn' + (sel.q ? ' on' : '') + '" id="mp-q-btn" title="Поиск">' +
-    '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"' +
-    ' stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>' +
-    '<path d="m20 20-3.8-3.8"/></svg></button>' +
-    '<button class="iconbtn" id="fl-open" title="Фильтры">' +
-    '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"' +
-    ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
-    '<path d="M3.5 8h17M3.5 16h17"/>' +
-    '<circle cx="10" cy="8" r="3.1" fill="currentColor" stroke="none"/>' +
-    '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
-    '<span id="fl-n"></span></button></div>' +
+    pillRowHtml(sel, 'mp-q-btn', false) +
     '<div class="searchrow" id="mp-qrow"' + (sel.q ? '' : ' hidden') + '>' +
     '<span class="sico">🔍</span>' +
     '<input id="mp-q" placeholder="Поиск на карте…" autocomplete="off" value="' +
@@ -2450,9 +2439,11 @@ async function S_map(opts) {
     { zoomControl: false, attributionControl: false });
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
   const layer = L.layerGroup().addTo(map);
-  const nActive = () => sel.typeSel.length + sel.whoSel.length;
   const flLabel = () => {
-    el.querySelector('#fl-n').textContent = nActive() ? nActive() : '';
+    el.querySelector('#fl-n').textContent = sel.whoSel.length || '';
+    el.querySelector('#fl-open').classList.toggle('on', !!sel.whoSel.length);
+    el.querySelector('#et-label').textContent = etText(sel);
+    el.querySelector('#et-open').classList.toggle('on', !!sel.typeSel.length);
   };
   const openCitySheet = (city, arr) => {
     const bg = document.createElement('div');
@@ -2553,6 +2544,12 @@ async function S_map(opts) {
       .concat(allPoints.filter(match)).length,
     onClose: redraw,
   });
+  el.querySelector('#et-open').onclick = () => openFilterSheet({
+    types: typeOptions, people: [], sel, typesOnly: true,
+    count: () => allEvents.filter(ev => evIntersects(ev, perNow())).filter(match)
+      .concat(allPoints.filter(match)).length,
+    onClose: redraw,
+  });
   const qInp = el.querySelector('#mp-q');
   qInp.addEventListener('input', () => {
     clearTimeout(qInp._t);
@@ -2622,6 +2619,35 @@ async function S_map(opts) {
   setTimeout(() => { map.invalidateSize(); redraw(); }, 60);
 }
 
+// ряд «пилюль» над лентой и картой — как в афише: лупа, Фильтры, Тип события (+ Карта)
+function etText(sel) {
+  if (!sel.typeSel.length) return 'Тип события';
+  if (sel.typeSel.length === 1) {
+    const t = sel.typeSel[0];
+    return t.length > 16 ? t.slice(0, 15) + '…' : t;
+  }
+  return 'Типы: ' + sel.typeSel.length;
+}
+
+function pillRowHtml(sel, qid, withMap) {
+  return '<div class="pillrow">' +
+    '<button class="pill' + (sel.q ? ' on' : '') + '" id="' + qid + '" title="Поиск">' +
+    '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>' +
+    '<path d="m20 20-3.8-3.8"/></svg></button>' +
+    '<button class="pill" id="fl-open">' +
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
+    '<path d="M3.5 8h17M3.5 16h17"/>' +
+    '<circle cx="10" cy="8" r="3.1" fill="currentColor" stroke="none"/>' +
+    '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
+    'Фильтры<span class="pilln" id="fl-n"></span></button>' +
+    '<button class="pill' + (sel.typeSel.length ? ' on' : '') + '" id="et-open">' +
+    '<span id="et-label">' + esc(etText(sel)) + '</span><span class="pv">⌄</span></button>' +
+    (withMap ? '<button class="pill mappill" id="map-open">Карта</button>' : '') +
+    '</div>';
+}
+
 function openFilterSheet(opts) {
   const bg = document.createElement('div');
   bg.className = 'sheetbg';
@@ -2634,13 +2660,15 @@ function openFilterSheet(opts) {
     // город здесь не выбирается — он ищется в основной строке поиска
     sh.innerHTML =
       '<div class="sheethandle"></div>' +
-      '<h3 style="margin-bottom:10px">Фильтры</h3>' +
-      '<div class="shsec">Вид</div><div class="chipwrap">' +
+      '<h3 style="margin-bottom:10px">' + (opts.typesOnly ? 'Тип события' : 'Фильтры') +
+      '</h3>' +
+      (opts.typesOnly ? '' : '<div class="shsec">Вид</div>') + '<div class="chipwrap">' +
       opts.types.map(t => chip('sht', t, t, opts.sel.typeSel.includes(t))).join('') + '</div>' +
-      '<div class="shsec">Кто едет</div><div class="chipwrap">' +
-      chip('shw', 'free', 'Свободные', opts.sel.whoSel.includes('free')) +
-      opts.people.map(p =>
-        chip('shw', p.id, p.name, opts.sel.whoSel.includes(p.id))).join('') + '</div>' +
+      (opts.typesOnly ? ''
+        : '<div class="shsec">Кто едет</div><div class="chipwrap">' +
+          chip('shw', 'free', 'Свободные', opts.sel.whoSel.includes('free')) +
+          opts.people.map(p =>
+            chip('shw', p.id, p.name, opts.sel.whoSel.includes(p.id))).join('') + '</div>') +
       '<div class="sheetfoot">' +
       '<button class="btn secondary" id="sh-reset" style="margin:0">Сбросить</button>' +
       '<button class="btn" id="sh-show" style="margin:0">Показать (' + opts.count() +
@@ -2654,7 +2682,7 @@ function openFilterSheet(opts) {
   sh.addEventListener('click', e => {
     if (e.target.id === 'sh-reset') {
       opts.sel.typeSel.length = 0;
-      opts.sel.whoSel.length = 0;
+      if (!opts.typesOnly) opts.sel.whoSel.length = 0;
       draw();
       return;
     }
@@ -2720,7 +2748,6 @@ async function S_places() {
           'ТОЧКИ</div>' + ptListHtml(pts)
         : '');
   };
-  const nActive = () => sel.typeSel.length + sel.whoSel.length;
   const evsNow = evsF(); // один прогон фильтра на всю шкалу, а не по разу на ячейку
   const strip = items.map(it => {
     const has = evsNow.some(ev => evIntersects(ev, calPeriod(PL_STATE.calMode, it.key)));
@@ -2744,19 +2771,7 @@ async function S_places() {
     '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
     '<button class="calarr left" id="cal-prev">‹</button>' +
     '<button class="calarr right" id="cal-next">›</button></div>' +
-    '<div class="iconrow">' +
-    '<button class="iconbtn' + (PL_STATE.q ? ' on' : '') + '" id="pl-q-btn" title="Поиск">' +
-    '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"' +
-    ' stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>' +
-    '<path d="m20 20-3.8-3.8"/></svg></button>' +
-    '<button class="iconbtn" id="fl-open" title="Фильтры">' +
-    '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"' +
-    ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
-    '<path d="M3.5 8h17M3.5 16h17"/>' +
-    '<circle cx="10" cy="8" r="3.1" fill="currentColor" stroke="none"/>' +
-    '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
-    '<span id="fl-n"></span></button>' +
-    '<button class="iconbtn" id="map-open" title="Карта событий">Карта</button></div>' +
+    pillRowHtml(PL_STATE, 'pl-q-btn', true) +
     '<div class="searchrow" id="pl-qrow"' + (PL_STATE.q ? '' : ' hidden') + '>' +
     '<span class="sico">🔍</span>' +
     '<input id="pl-q" placeholder="Поиск точек и мероприятий…" autocomplete="off" value="' +
@@ -2767,7 +2782,10 @@ async function S_places() {
   const el = screen('', html);
   const flBtn = el.querySelector('#fl-open');
   const flLabel = () => {
-    el.querySelector('#fl-n').textContent = nActive() ? nActive() : '';
+    el.querySelector('#fl-n').textContent = sel.whoSel.length || '';
+    flBtn.classList.toggle('on', !!sel.whoSel.length);
+    el.querySelector('#et-label').textContent = etText(sel);
+    el.querySelector('#et-open').classList.toggle('on', !!sel.typeSel.length);
   };
   flLabel();
   const qInp = el.querySelector('#pl-q');
@@ -2797,6 +2815,11 @@ async function S_places() {
     types: typeOptions,
     // в фильтре «кто едет» — только те, кто реально выезжает на точки
     people: meta.people.filter(p => p.role !== 'admin' && p.role !== 'keeper'), sel,
+    count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
+    onClose: applyAll,
+  });
+  el.querySelector('#et-open').onclick = () => openFilterSheet({
+    types: typeOptions, people: [], sel, typesOnly: true,
     count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
     onClose: applyAll,
   });
