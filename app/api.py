@@ -601,6 +601,29 @@ def api_places_meta(request: Request):
     return {"cities": services.places_cities(conn), "people": services.people_list(conn)}
 
 
+@app.post("/api/broadcast")
+def api_broadcast(request: Request, payload: dict = Body(...)):
+    """Рассылка сотрудникам в Telegram от админа/совладельца."""
+    u = current_user(request)
+    need_owner(u)
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise _err(400, "Текст уведомления пуст")
+    ids = [int(i) for i in (payload.get("user_ids") or [])]
+    if not ids:
+        raise _err(400, "Не выбраны получатели")
+    conn = db.get()
+    sent = 0
+    rows = conn.execute(
+        "SELECT tg_id FROM users WHERE active=1 AND id IN (%s)" % ",".join("?" * len(ids)),
+        ids).fetchall()
+    for r in rows:
+        if r["tg_id"] > 0:  # ручным пользователям без Telegram не отправить
+            bot.send_sync(r["tg_id"], "📣 " + text)
+            sent += 1
+    return {"sent": sent}
+
+
 @app.get("/api/geo")
 def api_geo(request: Request):
     """Координаты городов для карты событий (из локального кеша геокодера)."""

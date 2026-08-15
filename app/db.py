@@ -159,6 +159,10 @@ def _migrate(conn):
     if "avg_cost" not in scols:
         conn.execute("ALTER TABLE seller_stock ADD COLUMN avg_cost REAL NOT NULL DEFAULT 0")
 
+    ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+    if "last_seen" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS lots(
       id INTEGER PRIMARY KEY AUTOINCREMENT,

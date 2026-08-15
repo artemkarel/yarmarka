@@ -93,11 +93,14 @@ def user_create(conn, tg_id, first_name, last_name, username, tz, admin_ids):
 
 
 def user_touch(conn, uid, username, tz):
+    seen = datetime.now(timezone.utc).isoformat()
     with _lock, conn:
         if tz:
-            conn.execute("UPDATE users SET username=?, tz=? WHERE id=?", (username, tz, uid))
+            conn.execute("UPDATE users SET username=?, tz=?, last_seen=? WHERE id=?",
+                         (username, tz, seen, uid))
         else:
-            conn.execute("UPDATE users SET username=? WHERE id=?", (username, uid))
+            conn.execute("UPDATE users SET username=?, last_seen=? WHERE id=?",
+                         (username, seen, uid))
 
 
 def users_list(conn):

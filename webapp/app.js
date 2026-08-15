@@ -39,6 +39,17 @@ function tstr(ts) {
   return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
+// «последняя активность»: сегодня — только время, иначе дата и время (по местному)
+function seenStr(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d)) return '';
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const dd = String(d.getDate()).padStart(2, '0') + '.' +
+    String(d.getMonth() + 1).padStart(2, '0') + '.' + String(d.getFullYear()).slice(2);
+  return (sameDay ? 'сегодня' : dd) + ' ' + tstr(ts);
+}
+
 function toast(msg, ok) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -425,6 +436,7 @@ const ROW_ICONS = {
   box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5Z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>',
   cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M3.5 9.5h17"/><path d="M8 3v4"/><path d="M16 3v4"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20v-8"/><path d="M10 20V5"/><path d="M16 20v-11"/><path d="M22 20H2"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5a6 6 0 0 1 12 0c0 4.6 1.8 5.8 1.8 5.8H4.2S6 14.1 6 9.5Z"/><path d="M10 19a2.2 2.2 0 0 0 4 0"/></svg>',
 };
 
 // плавающие кнопки поверх длинных списков: ✕ — назад, ✓ — главное действие,
@@ -522,7 +534,12 @@ window.onDocToggle = async function (ev, id) {
 };
 
 function docLinesHtml(doc) {
-  return doc.lines.map(l => {
+  // кто и когда создал документ — всегда видно при раскрытии
+  return '<div class="row small"><div class="l hint">Создал(а)</div><div class="r">' +
+    esc(doc.creator_name || '—') +
+    (tstr(doc.ts) ? ' • ' + dstr((doc.ts || '').slice(0, 10)) + ' ' + tstr(doc.ts) : '') +
+    '</div></div>' +
+  doc.lines.map(l => {
     let txt = '';
     if (doc.type === 'prihod' || doc.type === 'initial') {
       txt = esc(l.name) + ' — ' + fmtQ(l.qty, l.unit);
@@ -1980,7 +1997,8 @@ async function S_invReport(docId) {
 }
 
 // ===== мероприятия и точки =====
-const PL_STATE = { calMode: 'day', selKey: null, citySel: [], typeSel: [], whoSel: [], q: '' };
+const PL_STATE = { calMode: 'day', selKey: null, yearAll: null, citySel: [], typeSel: [],
+  whoSel: [], q: '' };
 const RU_M_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт',
   'ноя', 'дек'];
 const RU_M_FULL = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август',
@@ -2129,7 +2147,8 @@ function evCardHtml(ev, n) {
   const place = [ev.city, addr].filter(Boolean).join(', ');
   return '<div class="card place" data-eid="' + ev.id + '" style="cursor:pointer">' +
     '<div class="pl-main">' +
-    '<div class="dochead"><div><b>' + n + '. ' + esc(ev.name) + '</b></div>' +
+    '<div class="dochead"><div><b>' + n + '. ' + esc(ev.name) + '</b>' +
+    '<span class="infoico">ⓘ</span></div>' +
     '<div class="dt">' + dates + '</div></div>' +
     '<div class="plfoot">' +
     (place ? '<div class="sub hint small">' + esc(place) + '</div>' : '') +
@@ -2163,7 +2182,7 @@ function ptCardHtml(pt, n) {
     '" style="margin:8px 0 0;padding:10px">Забронировать на эти даты</button></div>';
   return '<div class="card place" data-ptid="' + pt.id + '" style="cursor:pointer">' +
     '<div class="pl-main">' +
-    '<div><b>' + n + '. ' + esc(pt.name) + '</b></div>' +
+    '<div><b>' + n + '. ' + esc(pt.name) + '</b><span class="infoico">ⓘ</span></div>' +
     '<div class="plfoot"><div class="sub hint small">' +
     ([esc(pt.address || ''), esc(pt.city)].filter(Boolean).join(', ') || 'адрес не указан') +
     '</div>' +
@@ -2209,6 +2228,8 @@ function openMonthSheet(selKey, onPick) {
       '<div class="chipwrap">' + years.map(y =>
         '<button class="chip' + (y === year ? ' on' : '') + '" data-yr="' + y + '">' + y +
         '</button>').join('') + '</div>' +
+      '<button class="btn secondary" id="ms-all" style="margin:12px 0 0">' +
+      'Показать весь ' + year + ' год</button>' +
       '<div class="shsec">Месяц</div><div class="chipwrap">' + RU_M_FULL.map((m, i) =>
         '<button class="chip' +
         (year === cur.getFullYear() && i === cur.getMonth() ? ' on' : '') +
@@ -2218,6 +2239,12 @@ function openMonthSheet(selKey, onPick) {
   sh.addEventListener('click', e => {
     const y = e.target.closest('[data-yr]');
     if (y) { year = +y.dataset.yr; draw(); return; }
+    if (e.target.id === 'ms-all') {
+      // весь год разом — без выбора месяца и дня
+      close();
+      onPick(null, year);
+      return;
+    }
     const m = e.target.closest('[data-mi]');
     if (!m) return;
     const t = new Date();
@@ -2257,8 +2284,16 @@ function loadLeaflet() {
 }
 
 function yandexMapsUrl(x) {
-  const q = [x.city, x.address || ''].filter(Boolean).join(', ') || x.name;
-  return 'https://yandex.ru/maps/?text=' + encodeURIComponent(q);
+  // адреса из справочников бывают с «;» и кавычками — чистим, иначе поиск Яндекса
+  // не находит; при известных координатах города открываем сразу нужное место
+  const clean = s => String(s || '').replace(/[;«»"()]/g, ' ').replace(/\s+/g, ' ').trim();
+  const text = [clean(x.city), clean(x.address)].filter(Boolean).join(', ') || clean(x.name);
+  const g = MAP_GEO && MAP_GEO[x.city];
+  if (g) {
+    return 'https://yandex.ru/maps/?ll=' + g[1] + ',' + g[0] + '&z=12&text=' +
+      encodeURIComponent(text);
+  }
+  return 'https://yandex.ru/maps/?text=' + encodeURIComponent(text);
 }
 
 async function S_map(allEvents, allPoints, meta) {
@@ -2479,7 +2514,11 @@ async function S_places() {
   if (!items.some(it => it.key === PL_STATE.selKey)) {
     PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
   }
-  let per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
+  // «весь год» — период на год целиком, пока не выбран конкретный день
+  const perNow = () => PL_STATE.yearAll
+    ? { from: PL_STATE.yearAll + '-01-01', to: PL_STATE.yearAll + '-12-31' }
+    : calPeriod(PL_STATE.calMode, PL_STATE.selKey);
+  let per = perNow();
   const evsF = () => allEvents.filter(evMatch);
   const ptsF = () => allPoints.filter(ptMatch);
   const listBlock = () => {
@@ -2510,11 +2549,7 @@ async function S_places() {
     '<div class="searchrow"><span class="sico">🔍</span>' +
     '<input id="pl-q" placeholder="Поиск точек и мероприятий…" autocomplete="off" value="' +
     esc(PL_STATE.q || '') + '">' +
-    '<button id="map-open" title="Карта">' +
-    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
-    ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-    '<path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2Z"/><path d="M9 4v14"/>' +
-    '<path d="M15 6v14"/></svg></button>' +
+    '<button id="map-open" title="Карта событий">Карта</button>' +
     '<button id="fl-open" title="Фильтры">' +
     '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
     ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
@@ -2537,7 +2572,7 @@ async function S_places() {
     qInp._t = setTimeout(() => { PL_STATE.q = qInp.value; applyAll(); }, 250);
   });
   const applyAll = () => {
-    per = calPeriod(PL_STATE.calMode, PL_STATE.selKey);
+    per = perNow();
     el.querySelector('#pl-list').innerHTML = listBlock();
     const stripEl = el.querySelector('#cal-strip');
     for (const c of stripEl.children) {
@@ -2562,6 +2597,7 @@ async function S_places() {
     }
     const cal = e.target.closest('[data-cal]');
     if (cal) {
+      PL_STATE.yearAll = null; // выбран конкретный день — годовой режим снимается
       PL_STATE.selKey = cal.dataset.cal;
       el.querySelectorAll('.ditem').forEach(d =>
         d.classList.toggle('sel', d.dataset.cal === cal.dataset.cal));
@@ -2631,6 +2667,11 @@ async function S_places() {
   });
   const stripEl = el.querySelector('#cal-strip');
   const updMonth = () => {
+    if (PL_STATE.yearAll) {
+      el.querySelector('#ch-m').textContent = 'Весь';
+      el.querySelector('#ch-y').textContent = String(PL_STATE.yearAll);
+      return;
+    }
     // заголовок «Месяц Год» — по дню в центре видимой части шкалы
     const mid = stripEl.scrollLeft + stripEl.clientWidth * 0.45;
     for (const c of stripEl.children) {
@@ -2641,9 +2682,14 @@ async function S_places() {
       }
     }
   };
-  el.querySelector('#cal-head').onclick = () => openMonthSheet(PL_STATE.selKey, key => {
-    PL_STATE.selKey = key;
-    render(); // шкала пересобирается вокруг выбранного месяца
+  el.querySelector('#cal-head').onclick = () => openMonthSheet(PL_STATE.selKey, (key, yearAll) => {
+    if (yearAll) {
+      PL_STATE.yearAll = yearAll;
+    } else {
+      PL_STATE.yearAll = null;
+      PL_STATE.selKey = key;
+    }
+    render(); // шкала пересобирается вокруг выбранного
   });
   stripEl.addEventListener('scroll', () => {
     clearTimeout(stripEl._t);
@@ -2686,6 +2732,14 @@ async function S_eventView(ev, meta) {
   const parts = (ev.comment || '').split(' • ').filter(Boolean);
   const addr = parts[0] || '';
   const contacts = parts.slice(1);
+  // телефоны организатора — отдельными кликабельными строками (звонок в один тап)
+  const phones = [...new Set(((ev.comment || '').match(/(?:\+7|8)[\d\s()\-]{9,}/g) || [])
+    .map(p => p.trim()))];
+  const telHref = p => {
+    let d = p.replace(/\D/g, '');
+    if (d.length === 11 && d[0] === '8') d = '7' + d.slice(1);
+    return 'tel:+' + d;
+  };
   const row = (l, v) => '<div class="row"><div class="l hint">' + l +
     // длинный адрес переносим — иначе строка распирает экран вбок
     '</div><div class="r val" style="text-align:right;max-width:60%;white-space:normal;' +
@@ -2699,14 +2753,24 @@ async function S_eventView(ev, meta) {
     (addr ? row('📍 Площадка', esc(addr)) : '') +
     row('👤 Кто ездит', ev.owner_name ? esc(ev.owner_name)
       : '<span class="green">свободно</span>') +
+    phones.map(p => row('📞 Телефон',
+      '<a href="' + telHref(p) + '" style="color:var(--accent);font-weight:700;' +
+      'text-decoration:none">' + esc(p) + '</a>')).join('') +
     (contacts.length
       ? '<div class="hint small" style="margin-top:8px">' + esc(contacts.join(' • ')) + '</div>'
       : '') +
     '</div>' +
     '<div class="card" id="bk-box"></div>' +
+    '<button class="btn secondary" id="ev-map">🗺 Посмотреть на карте</button>' +
     '<button class="btn secondary" id="ev-edit">✏️ Редактировать</button>';
   const el = screen('Мероприятие', html, true);
   bookingBlock(el, 'event', ev.id, meta, ev);
+  el.querySelector('#ev-map').onclick = async () => {
+    if (!MAP_GEO) {
+      try { MAP_GEO = (await api('/api/geo')).geo; } catch (e) { /* и без гео откроется */ }
+    }
+    openExternal(yandexMapsUrl({ city: ev.city, address: addr, name: ev.name }));
+  };
   el.querySelector('#ev-edit').onclick = () => push(S_eventEdit, ev, meta);
 }
 
@@ -2834,7 +2898,7 @@ async function S_more() {
   const showUsers = admin || ME.role === 'keeper';
   const items = seller
     ? [['history', 'clock', 'История моих операций']]
-    : (ownerish ? [['exp', 'card', 'Расходы']] : [])
+    : (ownerish ? [['exp', 'card', 'Расходы'], ['push', 'bell', 'Рассылка сотрудникам']] : [])
       .concat([['docs', 'book', 'Журнал'], ['reports', 'file', 'Отчёты']])
       .concat(showUsers ? [['users', 'people', 'Пользователи']] : [])
       .concat(admin ? [['set', 'gear', 'Настройки']] : []);
@@ -2848,8 +2912,69 @@ async function S_more() {
     docs: () => push(S_docs),
     users: () => push(S_users),
     exp: () => push(S_expenses),
+    push: () => push(S_broadcast),
     set: () => push(S_settings),
   });
+}
+
+// рассылка сотрудникам в Telegram: инкассации, свободные мероприятия, свой текст
+async function S_broadcast() {
+  const meta = await api('/api/places/meta');
+  const people = meta.people.filter(p => p.id !== ME.id);
+  const sel = new Set(people.map(p => p.id)); // по умолчанию — все
+  const TPL = [
+    'Не забудь внести инкассацию за сегодня — открой приложение и скинь сумму терминала.',
+    'Появились свободные мероприятия — загляни во вкладку «Точки» и забронируй, пока не разобрали.',
+  ];
+  const html =
+    '<div class="shsec" style="margin-top:2px">Кому</div>' +
+    '<div class="chipwrap" id="bc-who">' +
+    '<button class="chip on" id="bc-all">Все</button>' +
+    people.map(p => '<button class="chip on" data-uid="' + p.id + '">' + esc(p.name) +
+      '</button>').join('') + '</div>' +
+    '<div class="shsec">Быстрые шаблоны</div>' +
+    '<div style="display:flex;flex-direction:column;gap:8px">' + TPL.map((t, i) =>
+      '<button class="chip" data-tpl="' + i + '" style="text-align:left;white-space:normal">' +
+      (i === 0 ? '💳 ' : '📍 ') + t + '</button>').join('') + '</div>' +
+    '<div class="field" style="margin-top:14px"><label>Текст уведомления</label>' +
+    '<textarea id="bc-text" rows="4" placeholder="Или напиши своё…"></textarea></div>' +
+    '<button class="btn" id="bc-send">Отправить уведомление</button>';
+  const el = screen('Рассылка сотрудникам', html, true);
+  el.querySelector('#bc-who').addEventListener('click', e => {
+    const all = e.target.closest('#bc-all');
+    const chips = [...el.querySelectorAll('#bc-who [data-uid]')];
+    if (all) {
+      const on = !all.classList.contains('on');
+      all.classList.toggle('on', on);
+      chips.forEach(c => {
+        c.classList.toggle('on', on);
+        const id = +c.dataset.uid;
+        if (on) sel.add(id); else sel.delete(id);
+      });
+      return;
+    }
+    const c = e.target.closest('[data-uid]');
+    if (!c) return;
+    const id = +c.dataset.uid;
+    if (sel.has(id)) { sel.delete(id); c.classList.remove('on'); }
+    else { sel.add(id); c.classList.add('on'); }
+    el.querySelector('#bc-all').classList.toggle('on', sel.size === people.length);
+  });
+  el.addEventListener('click', e => {
+    const t = e.target.closest('[data-tpl]');
+    if (t) el.querySelector('#bc-text').value = TPL[+t.dataset.tpl];
+  });
+  el.querySelector('#bc-send').onclick = async () => {
+    const text = el.querySelector('#bc-text').value.trim();
+    if (!text) return toast('Напиши текст или выбери шаблон');
+    if (!sel.size) return toast('Выбери, кому отправить');
+    if (!(await confirmDlg('Отправить уведомление ' + sel.size + ' сотрудник(ам)?'))) return;
+    try {
+      const r = await api('/api/broadcast', 'POST', { user_ids: [...sel], text });
+      toast('Отправлено: ' + r.sent + ' ✓', true);
+      back();
+    } catch (err) { toast(err.message); }
+  };
 }
 
 // быстрое управление ценами продажи: весь товар списком, справа — цена
@@ -3248,6 +3373,9 @@ async function S_users() {
       (u.username ? '@' + esc(u.username)
         : (u.tg_id > 0 ? 'id ' + u.tg_id : 'создан вручную, без Telegram')) +
       ' • ' + (roleTitle[u.role] || u.role) +
+      (seenStr(u.last_seen)
+        ? '<br>заходил(а): ' + seenStr(u.last_seen)
+        : '<br><span style="opacity:.7">ещё не заходил(а)</span>') +
       '</div></div><div class="r" style="display:flex;gap:6px;align-items:center">' +
       controls + '</div></div>';
   }).join('') + '</div>' +
