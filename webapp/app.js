@@ -2275,7 +2275,9 @@ function openMonthSheet(selKey, onPick) {
 const AI_STATE = { msgs: [] }; // история живёт, пока открыто приложение
 
 async function S_aiChat() {
-  const el = screen('Помощник', '<div id="chat-log"></div>', true);
+  const el = screen('Поиск точек', '<div id="chat-log"></div>', true);
+  el.querySelector('.subtitle').insertAdjacentHTML('beforeend',
+    '<div class="aion"><span class="aiondot"></span>помощник онлайн</div>');
   // панель ввода — в body: у #screen есть will-change:transform, из-за него
   // fixed-элементы внутри него позиционируются от экрана, а не от окна
   const bar = document.createElement('div');
@@ -2705,7 +2707,11 @@ async function S_places() {
     '<div class="calheadrow">' +
     '<div class="calhead" id="cal-head"><span id="ch-m"></span>' +
     '<span class="chy" id="ch-y"></span><span class="chv">▾</span></div>' +
-    '<button class="aibtn" id="ai-open">✨ Помощник</button></div>' +
+    '<button class="aibtn" id="ai-open"><span class="aiico">' +
+    '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-4-1L3 20l1.1-4A8.4 8.4 0 1 1 21 11.5Z"/>' +
+    '</svg><span class="aiondot"></span></span>Поиск точек</button></div>' +
     '<div class="calwrap"><div class="calbar">' +
     '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
     '<button class="calarr left" id="cal-prev">‹</button>' +

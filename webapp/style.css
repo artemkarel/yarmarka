@@ -163,8 +163,17 @@ details.doc .doclines{ padding:0 14px 12px; }
 .calheadrow .calhead{ margin:0; }
 .aibtn{ border:none; background:var(--card); color:var(--accent); font-size:13.5px;
   font-weight:700; border-radius:12px; padding:9px 12px; cursor:pointer;
-  transition:transform .12s ease; }
+  transition:transform .12s ease; display:flex; align-items:center; gap:7px; }
 .aibtn:active{ transform:scale(.95); }
+.aiico{ position:relative; display:inline-flex; }
+.aiico svg{ display:block; }
+.aiico .aiondot{ position:absolute; right:-3px; bottom:-2px; border:2px solid var(--card); }
+.aiondot{ width:8px; height:8px; border-radius:50%; background:#2fbf5f;
+  animation:aipulse 2s ease-in-out infinite; }
+@keyframes aipulse{ 0%,100%{ box-shadow:0 0 0 0 rgba(47,191,95,.45); }
+  50%{ box-shadow:0 0 0 5px rgba(47,191,95,0); } }
+.aion{ display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600;
+  color:#2fbf5f; margin-top:2px; }
 
 .msg{ max-width:82%; border-radius:16px; padding:11px 14px; margin-bottom:8px;
   font-size:15px; line-height:1.45; width:fit-content; }
