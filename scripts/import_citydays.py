@@ -52,10 +52,12 @@ def main():
             try:
                 r = cli.get(f"https://citiesdays.ru/letter/{ch}")
                 for m in re.finditer(
-                        r'href="(https?://citiesdays\.ru/[a-z0-9-]+/[a-z0-9-]+)"[^>]*>'
+                        r'href="(https?://citiesdays\.ru/([a-z0-9-]+)/[a-z0-9-]+)"[^>]*>'
                         r'([^<]{2,40})</a>', r.text):
-                    url, name = m.group(1), m.group(2).strip()
-                    if "/letter/" in url or name.lower() in ("сегодня", "скоро"):
+                    url, region, name = m.group(1), m.group(2), m.group(3).strip()
+                    # только Россия: справочник содержит и ua/by
+                    if region in ("ua", "by") or "/letter/" in url or \
+                            name.lower() in ("сегодня", "скоро"):
                         continue
                     cities[url] = name
             except Exception as e:  # noqa: BLE001
