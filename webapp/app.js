@@ -3607,7 +3607,7 @@ async function S_users() {
       '</div><div class="sub">' +
       (u.username ? '@' + esc(u.username)
         : (u.tg_id > 0 ? 'id ' + u.tg_id : 'создан вручную, без мессенджера')) +
-      (u.platform === 'MAX' ? ' • MAX' : '') +
+      (u.platform && u.platform !== 'TG' ? ' • ' + u.platform : '') +
       ' • ' + (roleTitle[u.role] || u.role) +
       (seenStr(u.last_seen)
         ? '<br>заходил(а): ' + seenStr(u.last_seen)
@@ -3747,6 +3747,10 @@ async function boot() {
     // мост MAX частично повторяет Telegram API — вызываем то, что он умеет
     try { if (maxApp.ready) maxApp.ready(); } catch (e) { /* нет метода */ }
     try { if (maxApp.expand) maxApp.expand(); } catch (e) { /* нет метода */ }
+    // свайп вниз не должен закрывать приложение (как в Telegram-версии)
+    try {
+      if (maxApp.disableVerticalSwipes) maxApp.disableVerticalSwipes();
+    } catch (e) { /* нет метода */ }
   }
   if (!DEV && !(tg && tg.initData) && !maxApp) {
     screen('', '<div class="card" style="text-align:center;padding:40px 20px">' +

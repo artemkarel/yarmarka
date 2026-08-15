@@ -186,6 +186,17 @@ def _migrate(conn):
     ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
     if "last_seen" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+    if "max_id" not in ucols:
+        # один человек — один аккаунт: id в MAX живёт рядом с Telegram-id
+        conn.execute("ALTER TABLE users ADD COLUMN max_id INTEGER")
+        conn.execute("ALTER TABLE users ADD COLUMN last_platform TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE users SET max_id = tg_id - ?, last_platform='max'"
+                     " WHERE tg_id >= ?", (config.MAX_UID_OFFSET, config.MAX_UID_OFFSET))
+        conn.execute("UPDATE users SET last_platform='tg' WHERE tg_id > 0 AND tg_id < ?",
+                     (config.MAX_UID_OFFSET,))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_max ON users(max_id)"
+                 " WHERE max_id IS NOT NULL")
+    _merge_cross_platform_dupes(conn)
 
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS lots(
@@ -230,6 +241,62 @@ def _migrate(conn):
                 conn.execute("INSERT OR IGNORE INTO product_groups(name, sort) VALUES(?,?)",
                              (norm, len(seen)))
                 seen.append(norm)
+    _fifo_start(conn)
+
+
+def _merge_cross_platform_dupes(conn):
+    """Один человек — один аккаунт: пары «тот же ФИО в Telegram и в MAX»
+    сливаются в Telegram-аккаунт (роль и история сохраняются у него)."""
+    max_only = conn.execute(
+        "SELECT * FROM users WHERE tg_id >= ?", (config.MAX_UID_OFFSET,)).fetchall()
+    if not max_only:
+        return
+    # сравнение ФИО — в Python: lower() в SQLite не понимает кириллицу
+    tg_users = conn.execute(
+        "SELECT * FROM users WHERE tg_id > 0 AND tg_id < ? AND max_id IS NULL",
+        (config.MAX_UID_OFFSET,)).fetchall()
+    key = lambda r: (r["first_name"].strip().lower(), r["last_name"].strip().lower())
+    by_name = {key(t): t for t in tg_users}
+    for m in max_only:
+        t = by_name.pop(key(m), None)
+        if t:
+            merge_users(conn, t["id"], m["id"], m["max_id"])
+
+
+def merge_users(conn, keep_id, drop_id, max_id):
+    """Переносит всю историю drop-аккаунта на keep и удаляет дубль."""
+    for tbl, col in (("docs", "seller_id"), ("docs", "created_by"),
+                     ("bookings", "user_id"), ("bookings", "created_by"),
+                     ("events", "owner_user_id"), ("events", "created_by"),
+                     ("points", "owner_user_id"), ("points", "created_by"),
+                     ("expenses", "created_by")):
+        conn.execute(f"UPDATE {tbl} SET {col}=? WHERE {col}=?", (keep_id, drop_id))
+    # товар на руках/полке: количества складываем, себестоимость — взвешенно
+    for r in conn.execute("SELECT * FROM seller_stock WHERE seller_id=?",
+                          (drop_id,)).fetchall():
+        ex = conn.execute(
+            "SELECT * FROM seller_stock WHERE seller_id=? AND product_id=?",
+            (keep_id, r["product_id"])).fetchone()
+        if ex:
+            hands = ex["qty_hands"] + r["qty_hands"]
+            cost = ((ex["qty_hands"] * ex["avg_cost"] + r["qty_hands"] * r["avg_cost"])
+                    / hands) if hands > 0.0001 else ex["avg_cost"]
+            conn.execute(
+                "UPDATE seller_stock SET qty_hands=?, qty_shelf=?, avg_cost=?"
+                " WHERE seller_id=? AND product_id=?",
+                (hands, ex["qty_shelf"] + r["qty_shelf"], cost, keep_id, r["product_id"]))
+            conn.execute("DELETE FROM seller_stock WHERE seller_id=? AND product_id=?",
+                         (drop_id, r["product_id"]))
+        else:
+            conn.execute("UPDATE seller_stock SET seller_id=? WHERE seller_id=?"
+                         " AND product_id=?", (keep_id, drop_id, r["product_id"]))
+    conn.execute("UPDATE users SET max_id=NULL WHERE id=?", (drop_id,))
+    conn.execute("DELETE FROM users WHERE id=?", (drop_id,))
+    conn.execute("UPDATE users SET max_id=?, last_platform='max' WHERE id=?",
+                 (max_id, keep_id))
+
+
+def _fifo_start(conn):
     # FIFO-старт для баз, живших без партий: остатки склада превращаем в стартовые партии
     has_lots = conn.execute("SELECT 1 FROM lots LIMIT 1").fetchone()
     if not has_lots:

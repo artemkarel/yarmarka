@@ -76,25 +76,27 @@ def tg_identity(request: Request):
                 did = int(dev)
             except ValueError:
                 raise _err(401, "Некорректный X-Dev-User")
-            return {"id": did, "first_name": f"Dev{did}", "username": f"dev{did}"}
+            return {"id": did, "first_name": f"Dev{did}", "username": f"dev{did}",
+                    "platform": "tg"}
     raw = request.headers.get("X-Tg-Init-Data", "")
-    if raw.startswith("max "):  # мини-приложение внутри MAX — id со сдвигом
+    if raw.startswith("max "):  # мини-приложение внутри MAX
         mu = auth.validate_max_init_data(raw[4:], config.MAX_BOT_TOKEN)
         if not mu:
             raise _err(401, "Откройте приложение через MAX")
-        return {"id": config.MAX_UID_OFFSET + int(mu["id"]),
+        return {"id": int(mu["id"]), "platform": "max",
                 "first_name": mu.get("first_name", ""),
                 "last_name": mu.get("last_name", ""),
                 "username": mu.get("username")}
     tg = auth.validate_init_data(raw, config.BOT_TOKEN)
     if not tg:
         raise _err(401, "Откройте приложение через Telegram")
+    tg["platform"] = "tg"
     return tg
 
 
 def current_user(request: Request):
     tg = tg_identity(request)
-    u = services.user_by_tg(db.get(), tg["id"])
+    u = services.user_by_ident(db.get(), tg)
     if u is None:
         raise HTTPException(401, detail={"need_registration": True})
     if not u["active"]:
@@ -142,16 +144,17 @@ def doc_date(payload, u):
 def api_auth(request: Request, payload: dict = Body(default={})):
     tg = tg_identity(request)
     conn = db.get()
-    u = services.user_by_tg(conn, tg["id"])
+    u = services.user_by_ident(conn, tg)
     if u is None:
-        u = services.adopt_manual(conn, tg)  # заведён вручную по нику — привязываем
+        u = services.adopt_ident(conn, tg)  # тот же человек по нику — привязываем
     if u is None:
         return {"need_registration": True,
                 "tg": {"first_name": tg.get("first_name", ""), "last_name": tg.get("last_name", "")}}
     if not u["active"]:
         raise _err(403, "Доступ отключён. Обратитесь к администратору.")
-    services.user_touch(conn, u["id"], tg.get("username"), (payload.get("tz") or "").strip() or None)
-    u = services.user_by_tg(conn, tg["id"])
+    services.user_touch(conn, u["id"], tg.get("username"),
+                        (payload.get("tz") or "").strip() or None, tg["platform"])
+    u = services.user_by_id(conn, u["id"])
     return {"user": u, "settings": services.settings_get(conn)}
 
 
@@ -159,11 +162,12 @@ def api_auth(request: Request, payload: dict = Body(default={})):
 def api_register(request: Request, payload: dict = Body(...)):
     tg = tg_identity(request)
     conn = db.get()
-    u = services.user_by_tg(conn, tg["id"])
+    u = services.user_by_ident(conn, tg)
     if u is None:
-        u = services.user_create(
-            conn, tg["id"], payload.get("first_name"), payload.get("last_name"),
-            tg.get("username"), (payload.get("tz") or "").strip() or None, config.ADMIN_IDS,
+        # один человек — один аккаунт: совпавшее ФИО из другого мессенджера связывается
+        u = services.user_register(
+            conn, tg, payload.get("first_name"), payload.get("last_name"),
+            (payload.get("tz") or "").strip() or None, config.ADMIN_IDS,
         )
     return {"user": u, "settings": services.settings_get(conn)}
 
@@ -377,7 +381,7 @@ def api_vydacha(request: Request, payload: dict = Body(...)):
             f"{_fm(ln['retail_price'])} = {_fm(ln['qty'] * ln['retail_price'])}"
             for i, ln in enumerate(doc["lines"]))
         bal = services.seller_balance(conn, doc["seller_id"])["balance"]
-        bot.send_sync(seller["tg_id"],
+        bot.notify_user(seller,
                       f"📦 Тебе выдан товар ({_date_ru(doc['date'])}):\n{lines_txt}\n\n"
                       f"Всего по ценам продажи: {_fm(doc['amount'])}\n"
                       f"Начислено за товар ({st['share_pct']:g}%): +{_fm(doc['money'])}\n"
@@ -399,7 +403,7 @@ def api_sdacha(request: Request, payload: dict = Body(...)):
         b = services.seller_balance(conn, doc["seller_id"])
         wh_val = sum(ln["qty_to_wh"] * ln["retail_price"] for ln in doc["lines"])
         shelf_val = sum(ln["qty_to_shelf"] * ln["retail_price"] for ln in doc["lines"])
-        bot.send_sync(seller["tg_id"],
+        bot.notify_user(seller,
                       f"↩️ Товар принят ({_date_ru(doc['date'])}).\n"
                       f"Продано на {_fm(doc['amount'])}\n"
                       f"Возвращено на склад: {_fm(wh_val)}\n"
@@ -502,7 +506,7 @@ def api_transfer(request: Request, payload: dict = Body(...)):
     frm = services.user_by_id(conn, doc["seller_id"])
     to_doc = next((c for c in doc["chain"] if c["rel"] == "child"), None)
     if frm:
-        bot.send_sync(frm["tg_id"], f"📤 Передача товара: с тебя снято товара на "
+        bot.notify_user(frm, f"📤 Передача товара: с тебя снято товара на "
                                     f"{_fm(doc['amount'])} и долг {_fm(-doc['money'])}.")
     if to_doc:
         to_full = services.doc_get(conn, to_doc["id"])
@@ -511,7 +515,7 @@ def api_transfer(request: Request, payload: dict = Body(...)):
             lines_txt = "\n".join(
                 f"{i + 1}. {ln['name']} — {_fq(ln['qty'])} {ln['unit']}"
                 for i, ln in enumerate(to_full["lines"]))
-            bot.send_sync(to_user["tg_id"],
+            bot.notify_user(to_user,
                           f"📥 Тебе передан товар ({_date_ru(doc['date'])}):\n{lines_txt}\n"
                           f"На сумму {_fm(doc['amount'])}, долг за товар +{_fm(-doc['money'])}.")
     return {"doc": doc}
@@ -658,11 +662,13 @@ def api_broadcast(request: Request, payload: dict = Body(...)):
     conn = db.get()
     sent = 0
     rows = conn.execute(
-        "SELECT tg_id FROM users WHERE active=1 AND id IN (%s)" % ",".join("?" * len(ids)),
+        "SELECT * FROM users WHERE active=1 AND id IN (%s)" % ",".join("?" * len(ids)),
         ids).fetchall()
     for r in rows:
-        if r["tg_id"] > 0:  # ручным пользователям без Telegram не отправить
-            bot.send_sync(r["tg_id"], "📣 " + text)
+        r = dict(r)
+        # ручным пользователям без мессенджера не отправить
+        if 0 < r["tg_id"] < config.MAX_UID_OFFSET or r["max_id"]:
+            bot.notify_user(r, "📣 " + text)
             sent += 1
     return {"sent": sent}
 

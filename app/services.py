@@ -69,6 +69,14 @@ def user_by_tg(conn, tg_id):
     return dict(r) if r else None
 
 
+def user_by_ident(conn, ident):
+    """Аккаунт по личности мессенджера: MAX ищем по max_id, Telegram — по tg_id."""
+    if ident.get("platform") == "max":
+        r = conn.execute("SELECT * FROM users WHERE max_id=?", (ident["id"],)).fetchone()
+        return dict(r) if r else None
+    return user_by_tg(conn, ident["id"])
+
+
 def user_by_id(conn, uid):
     r = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     return dict(r) if r else None
@@ -92,39 +100,96 @@ def user_create(conn, tg_id, first_name, last_name, username, tz, admin_ids):
     return user_by_tg(conn, tg_id)
 
 
-def user_touch(conn, uid, username, tz):
+def user_touch(conn, uid, username, tz, platform="tg"):
     seen = datetime.now(timezone.utc).isoformat()
+    sets, args = ["last_seen=?", "last_platform=?"], [seen, platform]
+    if username:
+        cur = user_by_id(conn, uid) or {}
+        # ник из MAX не затирает телеграмный — телеграмный основной
+        if platform == "tg" or not (cur.get("username") or ""):
+            sets.append("username=?")
+            args.append(username)
+    if tz:
+        sets.append("tz=?")
+        args.append(tz)
     with _lock, conn:
-        if tz:
-            conn.execute("UPDATE users SET username=?, tz=?, last_seen=? WHERE id=?",
-                         (username, tz, seen, uid))
-        else:
-            conn.execute("UPDATE users SET username=?, last_seen=? WHERE id=?",
-                         (username, seen, uid))
+        conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE id=?", args + [uid])
 
 
 def users_list(conn):
     rows = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY role, first_name")]
     for r in rows:
-        r["platform"] = ("MAX" if r["tg_id"] >= config.MAX_UID_OFFSET
-                         else "TG" if r["tg_id"] > 0 else "")
+        has_tg = 0 < r["tg_id"] < config.MAX_UID_OFFSET
+        r["platform"] = ("TG+MAX" if has_tg and r["max_id"]
+                         else "MAX" if r["max_id"] else "TG" if has_tg else "")
     return rows
 
 
-def adopt_manual(conn, tg_user):
-    """Привязка реального Telegram-аккаунта к заранее заведённому по нику."""
-    uname = (tg_user.get("username") or "").strip().lstrip("@")
+def adopt_ident(conn, ident):
+    """Привязка входа к существующему аккаунту по нику: заведённые вручную
+    и аккаунты, пришедшие раньше только из другого мессенджера. Один человек —
+    один аккаунт."""
+    uname = (ident.get("username") or "").strip().lstrip("@")
     if not uname:
         return None
+    if ident.get("platform") == "max":
+        r = conn.execute(
+            "SELECT id FROM users WHERE max_id IS NULL AND lower(username)=lower(?)",
+            (uname,)).fetchone()
+        if r is None:
+            return None
+        with _lock, conn:
+            conn.execute("UPDATE users SET max_id=? WHERE id=?", (ident["id"], r["id"]))
+        return user_by_id(conn, r["id"])
+    # Telegram: вручную заведённые (tg_id < 0) или бывшие только-MAX (tg_id со сдвигом)
     r = conn.execute(
-        "SELECT id FROM users WHERE tg_id < 0 AND lower(username)=lower(?)", (uname,)
-    ).fetchone()
+        "SELECT id FROM users WHERE (tg_id < 0 OR tg_id >= ?) AND lower(username)=lower(?)",
+        (config.MAX_UID_OFFSET, uname)).fetchone()
     if r is None:
         return None
     with _lock, conn:
         conn.execute("UPDATE users SET tg_id=?, username=? WHERE id=?",
-                     (tg_user["id"], tg_user.get("username"), r["id"]))
+                     (ident["id"], ident.get("username"), r["id"]))
     return user_by_id(conn, r["id"])
+
+
+def user_register(conn, ident, first_name, last_name, tz, admin_ids):
+    """Регистрация из мини-аппа. Если такое же ФИО уже есть в другом мессенджере —
+    привязываем этот вход к существующему аккаунту, дубль не создаётся."""
+    first_name = (first_name or "").strip()
+    last_name = (last_name or "").strip()
+    if not first_name or not last_name:
+        raise ValueError("Укажите имя и фамилию")
+    is_max = ident.get("platform") == "max"
+    # сравнение ФИО — в Python: lower() в SQLite не понимает кириллицу
+    if is_max:
+        cands = conn.execute("SELECT id, first_name, last_name FROM users"
+                             " WHERE max_id IS NULL").fetchall()
+    else:
+        cands = conn.execute("SELECT id, first_name, last_name FROM users"
+                             " WHERE tg_id < 0 OR tg_id >= ?",
+                             (config.MAX_UID_OFFSET,)).fetchall()
+    fn, ln = first_name.lower(), last_name.lower()
+    dup = next((r for r in cands
+                if r["first_name"].strip().lower() == fn
+                and r["last_name"].strip().lower() == ln), None)
+    if dup:
+        with _lock, conn:
+            if is_max:
+                conn.execute("UPDATE users SET max_id=?, last_platform='max' WHERE id=?",
+                             (ident["id"], dup["id"]))
+            else:
+                conn.execute("UPDATE users SET tg_id=?, last_platform='tg' WHERE id=?",
+                             (ident["id"], dup["id"]))
+        return user_by_id(conn, dup["id"])
+    tg_id = (config.MAX_UID_OFFSET + ident["id"]) if is_max else ident["id"]
+    u = user_create(conn, tg_id, first_name, last_name, ident.get("username"), tz, admin_ids)
+    if is_max:
+        with _lock, conn:
+            conn.execute("UPDATE users SET max_id=?, last_platform='max' WHERE id=?",
+                         (ident["id"], u["id"]))
+        u = user_by_id(conn, u["id"])
+    return u
 
 
 def user_create_manual(conn, first_name, last_name, role, tg_id=None, username=None):

@@ -37,6 +37,19 @@ def send_sync(chat_id, text):
 
     threading.Thread(target=_go, daemon=True).start()
 
+
+def notify_user(u, text):
+    """Уведомление объединённому пользователю: шлём в мессенджер, где он был
+    последним; если там его нет — в тот, что есть."""
+    if not u:
+        return
+    has_tg = 0 < (u.get("tg_id") or 0) < config.MAX_UID_OFFSET
+    if u.get("max_id") and (u.get("last_platform") == "max" or not has_tg):
+        from . import max_bot
+        max_bot.send_sync(u["max_id"], text)
+    elif has_tg:
+        send_sync(u["tg_id"], text)
+
 REMIND_TEXT = (
     "⏰ Не забудь про инкассацию за сегодня!\n\n"
     "Скинь чек в рабочий чат и внеси сумму терминала в приложении."
@@ -117,7 +130,9 @@ async def reminders_loop(bot):
         try:
             conn = db.get()
             now = datetime.now(timezone.utc)
-            for u in conn.execute("SELECT * FROM users WHERE active=1 AND tg_id > 0"):
+            for u in conn.execute(
+                    "SELECT * FROM users WHERE active=1"
+                    " AND (tg_id > 0 OR max_id IS NOT NULL)"):
                 u = dict(u)
                 try:
                     tz = ZoneInfo(u["tz"] or config.DEFAULT_TZ)
@@ -134,11 +149,14 @@ async def reminders_loop(bot):
                 if services.incass_exists(conn, u["id"], ldate):
                     services.mark_reminded(conn, u["id"], ldate)
                     continue
-                if u["tg_id"] >= config.MAX_UID_OFFSET:
+                has_tg = 0 < u["tg_id"] < config.MAX_UID_OFFSET
+                if u["max_id"] and (u["last_platform"] == "max" or not has_tg):
                     from . import max_bot
-                    await max_bot.send(u["tg_id"] - config.MAX_UID_OFFSET, REMIND_TEXT)
-                else:
+                    await max_bot.send(u["max_id"], REMIND_TEXT)
+                elif has_tg:
                     await bot.send(u["tg_id"], REMIND_TEXT, reply_markup=_open_button())
+                else:
+                    continue
                 services.mark_reminded(conn, u["id"], ldate)
                 log.info("reminder sent to %s", u["tg_id"])
         except asyncio.CancelledError:
