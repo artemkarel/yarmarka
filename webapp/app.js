@@ -143,6 +143,12 @@ window.back = back;
 if (tg) tg.BackButton.onClick(back);
 
 // клавиатура не должна мешать: прокрутка списка или Enter закрывают её
+// клавиатуру прячем сразу на касании вне поля — чтобы жест «назад» не тратился
+// на её закрытие; на touchmove оставлено для прокрутки, начатой с самого поля
+document.addEventListener('touchstart', e => {
+  const a = document.activeElement;
+  if (a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && e.target !== a) a.blur();
+}, { passive: true });
 document.addEventListener('touchmove', e => {
   const a = document.activeElement;
   if (a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && e.target !== a) a.blur();
@@ -237,7 +243,7 @@ function screen(title, html, sub) {
     sw = (e.touches.length === 1 && stack.length > 1 && !backBusy &&
           !e.target.closest('.dstrip, .chips, .sheet, .sheetbg, #map-box'))
       ? { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(),
-          engaged: false, dead: false, w: 0 }
+          engaged: false, dead: false, w: 0, lastDx: 0 }
       : null;
   }, { passive: true });
 
@@ -253,6 +259,7 @@ function screen(title, html, sub) {
     }
     if (e.cancelable) e.preventDefault(); // пока тянем — страницу не скроллим
     const d = Math.max(0, dx);
+    sw.lastDx = d;
     const el = sc();
     el.style.transition = 'none';
     el.style.transform = 'translateX(' + d + 'px)';
@@ -302,8 +309,11 @@ function screen(title, html, sub) {
   }, { passive: true });
 
   document.addEventListener('touchcancel', () => {
-    // систему перехватило — мягко возвращаем экран на место
-    release(0, 9999, true);
+    // систему перехватило (например, закрылась клавиатура) — решаем по уже
+    // пройденному пути, а не отменяем жест: свайп срабатывает с первого раза
+    const dx = sw && sw.lastDx || 0;
+    const dt = sw ? Date.now() - sw.t : 9999;
+    release(dx, dt, false);
   }, { passive: true });
 })();
 
@@ -2336,21 +2346,17 @@ function loadLeaflet() {
   return LEAFLET_P;
 }
 
-function yandexMapsUrl(x) {
-  // адреса из справочников бывают с «;» и кавычками — чистим, иначе поиск Яндекса
-  // не находит; при известных координатах города открываем сразу нужное место
-  const clean = s => String(s || '').replace(/[;«»"()]/g, ' ').replace(/\s+/g, ' ').trim();
-  const text = [clean(x.city), clean(x.address)].filter(Boolean).join(', ') || clean(x.name);
-  const g = MAP_GEO && MAP_GEO[x.city];
-  if (g) {
-    return 'https://yandex.ru/maps/?ll=' + g[1] + ',' + g[0] + '&z=12&text=' +
-      encodeURIComponent(text);
-  }
-  return 'https://yandex.ru/maps/?text=' + encodeURIComponent(text);
-}
-
-async function S_map(allEvents, allPoints, meta) {
+async function S_map(opts) {
+  opts = opts || {};
   if (!MAP_GEO) MAP_GEO = (await api('/api/geo')).geo;
+  const meta = opts.meta || (await api('/api/places/meta'));
+  let allEvents = opts.events;
+  let allPoints = opts.points;
+  if (!allEvents || !allPoints) {
+    const [er, pr] = await Promise.all([api('/api/events?when=all'), api('/api/points')]);
+    allEvents = er.events;
+    allPoints = pr.points;
+  }
   try {
     await loadLeaflet();
   } catch (e) {
@@ -2408,16 +2414,22 @@ async function S_map(allEvents, allPoints, meta) {
               ? ' – ' + dstr(x.date_to) : '')
           : 'постоянная точка') +
         (x.owner_name ? ' • ездит: ' + esc(x.owner_name) : '') + '</div></div>' +
-        '<div class="r"><button class="chip" data-ya="' + esc(yandexMapsUrl(x)) +
-        '">🗺</button></div></div>').join('');
+        '<div class="r"><button class="chip" data-zoom="' + esc(city) +
+        '">📍</button></div></div>').join('');
     const close = () => {
       document.body.classList.remove('sheet-open');
       bg.remove(); sh.remove();
     };
     bg.onclick = close;
     sh.addEventListener('click', e => {
-      const ya = e.target.closest('[data-ya]');
-      if (ya) { openExternal(ya.dataset.ya); return; }
+      const zm = e.target.closest('[data-zoom]');
+      if (zm) {
+        // приближаем город прямо на нашей карте — без внешних сайтов
+        close();
+        const g = MAP_GEO[zm.dataset.zoom];
+        if (g) map.setView(g, 13);
+        return;
+      }
       const op = e.target.closest('[data-open]');
       if (!op) return;
       const parts = op.dataset.open.split(':');
@@ -2433,6 +2445,7 @@ async function S_map(allEvents, allPoints, meta) {
     document.body.appendChild(bg);
     document.body.appendChild(sh);
   };
+  let focusPending = opts.focusCity || null;
   const redraw = () => {
     layer.clearLayers();
     // на карте — будущие события + постоянные точки, с теми же фильтрами
@@ -2459,8 +2472,16 @@ async function S_map(allEvents, allPoints, meta) {
       mk.on('click', () => openCitySheet(city, byCity[city]));
       mk.addTo(layer);
     });
-    if (bounds.length) map.fitBounds(bounds, { padding: [28, 28], maxZoom: 10 });
-    else map.setView([56.5, 55.0], 4);
+    if (focusPending && MAP_GEO[focusPending]) {
+      // открыли карту из карточки мероприятия — сразу показываем его город
+      map.setView(MAP_GEO[focusPending], 12);
+      if (byCity[focusPending]) openCitySheet(focusPending, byCity[focusPending]);
+      focusPending = null;
+    } else if (bounds.length) {
+      map.fitBounds(bounds, { padding: [28, 28], maxZoom: 10 });
+    } else {
+      map.setView([56.5, 55.0], 4);
+    }
     el.querySelector('#mp-count').textContent = located
       ? 'На карте: ' + located + ' (тапни по кружку города)'
       : 'Ничего не найдено — измени фильтры';
@@ -2656,7 +2677,8 @@ async function S_places() {
     count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
     onClose: applyAll,
   });
-  el.querySelector('#map-open').onclick = () => push(S_map, allEvents, allPoints, meta);
+  el.querySelector('#map-open').onclick = () =>
+    push(S_map, { events: allEvents, points: allPoints, meta: meta });
   el.querySelector('#ai-open').onclick = () => push(S_aiChat);
   el.addEventListener('click', async e => {
     const add = e.target.closest('[data-add]');
@@ -2823,8 +2845,8 @@ async function S_eventView(ev, meta) {
     row('👤 Кто ездит', ev.owner_name ? esc(ev.owner_name)
       : '<span class="green">свободно</span>') +
     phones.map(p => row('📞 Телефон',
-      '<a href="' + telHref(p) + '" style="color:var(--accent);font-weight:700;' +
-      'text-decoration:none">' + esc(p) + '</a>')).join('') +
+      '<button class="telbtn" data-tel="' + telHref(p) + '">' + esc(p) + '</button>'))
+      .join('') +
     (contacts.length
       ? '<div class="hint small" style="margin-top:8px">' + esc(contacts.join(' • ')) + '</div>'
       : '') +
@@ -2834,12 +2856,12 @@ async function S_eventView(ev, meta) {
     '<button class="btn secondary" id="ev-edit">✏️ Редактировать</button>';
   const el = screen('Мероприятие', html, true);
   bookingBlock(el, 'event', ev.id, meta, ev);
-  el.querySelector('#ev-map').onclick = async () => {
-    if (!MAP_GEO) {
-      try { MAP_GEO = (await api('/api/geo')).geo; } catch (e) { /* и без гео откроется */ }
-    }
-    openExternal(yandexMapsUrl({ city: ev.city, address: addr, name: ev.name }));
-  };
+  // карта открывается внутри приложения, сразу на городе мероприятия
+  el.querySelector('#ev-map').onclick = () => push(S_map, { focusCity: ev.city, meta: meta });
+  el.addEventListener('click', e => {
+    const tb = e.target.closest('[data-tel]');
+    if (tb) window.location.href = tb.dataset.tel; // набор номера из WebView
+  });
   el.querySelector('#ev-edit').onclick = () => push(S_eventEdit, ev, meta);
 }
 
@@ -2893,7 +2915,10 @@ async function S_pointEdit(pt, meta, scrollToBooking) {
   const contacts = pt
     ? '<div class="card"><h3>📞 Контакты точки</h3>' +
       '<div class="row"><div class="l hint">Телефон</div><div class="r val">' +
-      (pt.phone ? '<a href="tel:' + esc(pt.phone) + '">' + esc(pt.phone) + '</a>'
+      (pt.phone
+        ? '<button class="telbtn" onclick="window.location.href=\'tel:+' +
+          esc((pt.phone.replace(/\D/g, '').replace(/^8/, '7'))) + '\'">' +
+          esc(pt.phone) + '</button>'
         : '<span class="hint">не указан</span>') + '</div></div>' +
       '<div class="row"><div class="l hint">Почта</div><div class="r val">' +
       (pt.email ? '<a href="mailto:' + esc(pt.email) + '">' + esc(pt.email) + '</a>'
