@@ -121,6 +121,11 @@ def main():
                 continue
             name = str(name).strip()
             city = short_city(mun)
+            # ярмарки различаем по листу: коммерческие (expomap) отдельно от сельхоз
+            etype = str(etype or "").strip()
+            if etype == "Ярмарка":
+                etype = ("Ярмарка коммерческая" if sheet == "Коммерческие ярмарки"
+                         else "Сельхозярмарка")
             dates = parse_period(period)
             comment = build_comment(place if dates else None, contact, phone, cost, site,
                                     None if dates else period)
@@ -128,7 +133,7 @@ def main():
                 if event_exists(name, city, dates[0]):
                     skipped += 1
                     continue
-                services.event_save(conn, fake_user, None, name, str(etype or "").strip(),
+                services.event_save(conn, fake_user, None, name, etype,
                                     city, dates[0], dates[1], None, comment)
                 ev_added += 1
             else:

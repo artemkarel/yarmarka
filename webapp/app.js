@@ -149,6 +149,8 @@ function screen(title, html, sub) {
   const old = document.getElementById('screen');
   const el = old.cloneNode(false);
   old.replaceWith(el);
+  const fb = document.querySelector('.fab-bar');
+  if (fb) fb.remove(); // плавающие кнопки живут в body — чистим при смене экрана
   const head = sub
     ? '<div class="subhead"><button class="backbtn" onclick="back()">‹</button>' +
       '<div class="subtitle">' + esc(title) + '</div></div>'
@@ -169,32 +171,35 @@ function screen(title, html, sub) {
   return el;
 }
 
-// свайп слева направо — назад: механика системного жеста iOS.
-// Экран стоит под пальцем с первого пикселя, решение о завершении — по мгновенной
-// скорости последних кадров (быстрый флик добивает всегда), доезд — со скоростью пальца.
+// свайп вправо — назад: устройство один в один как в mealplan (там проверено в бою).
+// Жест ловится с любого места экрана — левую кромку в iOS-Телеграме забирает себе
+// сам Телеграм, поэтому от кромки жест не работает. Захватываем движение только
+// после явного горизонтального сдвига (dx ≥ 14 и больше вертикали), preventDefault —
+// только после захвата: тапы и прокрутка не страдают.
 (function () {
   const sc = () => document.getElementById('screen');
-  const EDGE = 32;  // зона старта у левой кромки
-  const ACT = 6;    // сдвиг, после которого жест признан (тап не страдает)
-  const EASE = 'cubic-bezier(.2,.7,.3,1)';
-  let t0 = null;
+  let sw = null;
   let under = null;
 
-  function makeUnder() {
+  function makeUnder(w) {
     const prev = stack[stack.length - 2];
-    if (!prev || !prev.html) return;
     const el = sc();
     under = document.createElement('div');
     under.id = 'screen-under';
     under.style.cssText = 'position:absolute; left:' + el.offsetLeft + 'px; width:' +
       el.offsetWidth + 'px; top:' + el.offsetTop + 'px; bottom:0; overflow:hidden; ' +
-      'z-index:0; pointer-events:none; transform:translateX(-28%);';
-    under.innerHTML = '<div style="transform:translateY(-' + (prev.scrollY || 0) + 'px)">' +
-      prev.html + '</div>' +
+      'z-index:0; pointer-events:none; transform:translateX(' + (-0.25 * w) + 'px);';
+    under.innerHTML = (prev && prev.html
+      ? '<div style="transform:translateY(-' + (prev.scrollY || 0) + 'px)">' + prev.html +
+        '</div>'
+      : '') +
       // затемнение нижнего экрана — рассеивается по мере свайпа, как в iOS
       '<div class="under-dim" style="position:absolute;inset:0;background:#000;' +
       'opacity:.22;pointer-events:none"></div>';
     el.parentElement.insertBefore(under, el);
+    // КРИТИЧНО: анимации экрана (anim-push и др.) с fill:both перебивают
+    // inline-transform — из-за них экран не двигался под пальцем
+    el.classList.remove('anim-push', 'anim-backin', 'anim-tab');
     el.classList.add('dragging');
   }
 
@@ -210,123 +215,77 @@ function screen(title, html, sub) {
     }, delay || 0);
   }
 
-  function setPos(tx) {
+  document.addEventListener('touchstart', e => {
+    sw = (e.touches.length === 1 && stack.length > 1 && !backBusy &&
+          !e.target.closest('.dstrip, .chips, .sheet, .sheetbg'))
+      ? { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now(),
+          engaged: false, dead: false, w: 0 }
+      : null;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!sw || sw.dead) return;
+    const dx = e.touches[0].clientX - sw.x, dy = e.touches[0].clientY - sw.y;
+    if (!sw.engaged) {
+      if (Math.abs(dy) > 14 && Math.abs(dy) > dx) { sw.dead = true; return; } // это скролл
+      if (dx < 14 || dx <= Math.abs(dy)) return;                              // ещё не ясно
+      sw.engaged = true;
+      sw.w = sc().clientWidth || innerWidth;
+      makeUnder(sw.w);
+    }
+    if (e.cancelable) e.preventDefault(); // пока тянем — страницу не скроллим
+    const d = Math.max(0, dx);
     const el = sc();
     el.style.transition = 'none';
-    el.style.transform = 'translateX(' + tx + 'px)';
+    el.style.transform = 'translateX(' + d + 'px)';
     if (under) {
-      const prog = Math.min(1, Math.max(0, tx / el.offsetWidth));
       under.style.transition = 'none';
-      under.style.transform = 'translateX(' + (-28 + 28 * prog) + '%)';
+      under.style.transform = 'translateX(' + (-0.25 * sw.w + d / 4).toFixed(1) + 'px)';
       const dim = underDim();
-      if (dim) { dim.style.transition = 'none'; dim.style.opacity = String(0.22 * (1 - prog)); }
+      if (dim) dim.style.opacity = String(0.22 * Math.max(0, 1 - d / sw.w));
     }
-  }
+  }, { passive: false });
 
-  function finish() {
-    const el = sc();
-    const st = t0;
-    t0 = null;
-    const w = el.offsetWidth || 1;
-    const tx = Math.max(0, st.tx || 0);
-    // мгновенная скорость — по хвосту траектории (последние ~90 мс)
-    let v = 0;
-    const tr = st.trail;
-    if (tr.length > 1) {
-      const a = tr[0], b = tr[tr.length - 1];
-      if (b.t > a.t) v = (b.x - a.x) / (b.t - a.t); // px/ms
+  function release(dx, dt, cancelled) {
+    const s = sw;
+    sw = null;
+    if (!s || !s.engaged) return;
+    const el = sc(), w = s.w;
+    const done = !cancelled && !backBusy &&
+      (dx > w * 0.33 || (dx > 70 && dt < 300)); // дотянул или резко смахнул
+    if (done) backBusy = true;
+    el.style.transition = 'transform .2s ease';
+    el.style.transform = done ? 'translateX(' + w + 'px)' : 'translateX(0)';
+    if (under) {
+      under.style.transition = 'transform .2s ease, opacity .2s ease';
+      under.style.transform = done ? 'translateX(0)' : 'translateX(' + (-0.25 * w) + 'px)';
+      const dim = underDim();
+      if (dim) { dim.style.transition = 'opacity .2s ease'; dim.style.opacity = done ? '0' : '.22'; }
     }
-    // назад: быстрый флик — всегда; иначе треть ширины, если палец не шёл обратно
-    const go = !backBusy && (v > 0.35 || (tx > w * 0.35 && v > -0.15));
-    if (go) {
-      backBusy = true;
-      const rest = Math.max(40, w - tx);
-      // доезд продолжает скорость пальца: быстро отпустил — быстро уехал
-      const dur = Math.round(Math.max(120, Math.min(320, v > 0.2 ? rest / v : 260)));
-      el.style.transition = 'transform ' + dur + 'ms ' + EASE;
-      el.style.transform = 'translateX(102%)';
-      if (under) {
-        under.style.transition = 'transform ' + dur + 'ms ' + EASE;
-        under.style.transform = 'translateX(0)';
-        const dim = underDim();
-        if (dim) { dim.style.transition = 'opacity ' + dur + 'ms ease'; dim.style.opacity = '0'; }
-      }
-      setTimeout(() => {
-        el.style.transition = '';
-        el.style.transform = '';
+    setTimeout(() => {
+      el.style.transition = '';
+      el.style.transform = '';
+      if (done) {
         stack.pop();
         RESTORE_Y = stack[stack.length - 1].scrollY || 0;
         ANIM = null; // подложка уже показала предыдущий экран — без второй анимации
         render();
-        dropUnder(40);
         backBusy = false;
         if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
-      }, dur);
-    } else {
-      const dur = Math.round(Math.max(100, Math.min(220, tx * 0.9)));
-      el.style.transition = 'transform ' + dur + 'ms ease-out';
-      el.style.transform = 'translateX(0)';
-      if (under) {
-        under.style.transition = 'transform ' + dur + 'ms ease-out';
-        under.style.transform = 'translateX(-28%)';
-        const dim = underDim();
-        if (dim) { dim.style.transition = 'opacity ' + dur + 'ms ease-out'; dim.style.opacity = '.22'; }
       }
-      dropUnder(dur + 30);
-      setTimeout(() => {
-        const e2 = sc();
-        if (e2) { e2.style.transition = ''; e2.style.transform = ''; }
-      }, dur + 10);
-    }
+      dropUnder(done ? 40 : 0);
+    }, 210);
   }
 
-  document.addEventListener('touchstart', e => {
-    t0 = null;
-    if (stack.length < 2 || backBusy) return;
-    // горизонтальным лентам (календарь, чипсы) и нижним листам не мешаем
-    if (e.target.closest('.dstrip, .chips, .sheet, .sheetbg')) return;
-    const t = e.touches[0];
-    if (t.clientX <= EDGE) {
-      t0 = { x: t.clientX, y: t.clientY, drag: false, dead: false, tx: 0,
-        trail: [{ x: t.clientX, t: Date.now() }] };
-    }
-  }, { passive: true });
-
-  document.addEventListener('touchmove', e => {
-    if (!t0 || t0.dead) return;
-    const t = e.touches[0];
-    const dx = t.clientX - t0.x, dy = t.clientY - t0.y;
-    if (!t0.drag) {
-      // уверенное вертикальное движение — отдаём прокрутке
-      if (Math.abs(dy) > 8 && Math.abs(dy) > Math.abs(dx)) { t0.dead = true; return; }
-      // ВАЖНО: глушим дефолт с первого же движения от кромки, иначе WebView
-      // Телеграма заберёт жест себе и пришлёт touchcancel на полпути
-      if (e.cancelable) e.preventDefault();
-      if (dx > ACT && dx > Math.abs(dy)) {
-        t0.drag = true;
-        if (!under) makeUnder();
-      } else return;
-    }
-    if (e.cancelable) e.preventDefault(); // жест наш — не отдаём его прокрутке
-    // сдвиг считаем от точки активации — экран трогается без скачка
-    t0.tx = Math.max(0, dx - ACT);
-    const now = Date.now();
-    t0.trail.push({ x: t.clientX, t: now });
-    while (t0.trail.length > 2 && now - t0.trail[0].t > 90) t0.trail.shift();
-    setPos(t0.tx);
-  }, { passive: false });
-
-  document.addEventListener('touchend', () => {
-    if (!t0) return;
-    if (!t0.drag) { t0 = null; return; }
-    finish();
+  document.addEventListener('touchend', e => {
+    if (!sw) return;
+    const dx = e.changedTouches[0].clientX - sw.x;
+    release(dx, Date.now() - sw.t, false);
   }, { passive: true });
 
   document.addEventListener('touchcancel', () => {
-    // систему перехватило — всё равно решаем по пройденному пути
-    if (!t0) return;
-    if (!t0.drag) { t0 = null; return; }
-    finish();
+    // систему перехватило — мягко возвращаем экран на место
+    release(0, 9999, true);
   }, { passive: true });
 })();
 
@@ -460,6 +419,30 @@ const ROW_ICONS = {
   cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M3.5 9.5h17"/><path d="M8 3v4"/><path d="M16 3v4"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20v-8"/><path d="M10 20V5"/><path d="M16 20v-11"/><path d="M22 20H2"/></svg>',
 };
+
+// плавающие кнопки поверх длинных списков: ✕ — назад, ✓ — главное действие,
+// чтобы сохранить можно было в любой момент, не мотая список до низа
+function floatSave(el, mainSelector) {
+  const bar = document.createElement('div');
+  bar.className = 'fab-bar';
+  bar.innerHTML =
+    '<button class="fab fab-x" aria-label="Отмена">' +
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>' +
+    '</button>' +
+    '<button class="fab fab-ok" aria-label="Сохранить">' +
+    '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="m5 12.5 5 5L19.5 7"/></svg></button>';
+  // в body, не в #screen: у экрана will-change:transform, из-за него fixed
+  // позиционировался бы от экрана и кнопки уезжали бы в низ длинного списка
+  document.body.appendChild(bar);
+  bar.querySelector('.fab-x').onclick = () => back();
+  bar.querySelector('.fab-ok').onclick = () => {
+    const b = el.querySelector(mainSelector);
+    if (b) b.click();
+  };
+}
 
 function menuRows(items) {
   return '<div class="rowmenu">' + items.map(it =>
@@ -608,6 +591,24 @@ async function S_docView(id) {
 }
 
 // живой поиск товара: печатаешь название — снизу предлагаются позиции
+// поиск по сокращениям: «кл в й» находит «Клюква в йогурте» — каждое слово запроса
+// должно быть началом очередного слова названия (по порядку слов)
+function fuzzyMatch(query, text) {
+  const q = String(query || '').toLowerCase().trim();
+  if (!q) return true;
+  const t = String(text || '').toLowerCase();
+  if (t.includes(q)) return true;
+  const qw = q.split(/\s+/);
+  const tw = t.split(/[\s,.()/«»"-]+/).filter(Boolean);
+  let i = 0;
+  for (const w of qw) {
+    while (i < tw.length && !tw[i].startsWith(w)) i++;
+    if (i >= tw.length) return false;
+    i++;
+  }
+  return true;
+}
+
 function attachProductSearch(el, products, opts) {
   const inp = el.querySelector('#' + opts.input);
   const box = el.querySelector('#' + opts.box);
@@ -615,7 +616,7 @@ function attachProductSearch(el, products, opts) {
     const q = inp.value.toLowerCase().trim();
     if (!q) { box.innerHTML = ''; box.hidden = true; return; }
     const items = products.filter(p => !p.archived &&
-      (p.name.toLowerCase().includes(q) || (p.group_name || '').toLowerCase().includes(q)))
+      (fuzzyMatch(q, p.name) || fuzzyMatch(q, p.group_name)))
       .slice(0, 25);
     box.hidden = false;
     box.innerHTML = items.length ? items.map(p => {
@@ -718,7 +719,7 @@ async function S_skladView() {
   el.querySelector('#sv-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(row => {
-      row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
+      row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
     });
   });
 }
@@ -862,7 +863,7 @@ async function S_sklad() {
   el.querySelector('#sk-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.skrow').forEach(row => {
-      row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
+      row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
     });
     el.querySelectorAll('.skgroup').forEach(g => { g.style.display = q ? 'none' : ''; });
   });
@@ -913,6 +914,7 @@ async function S_prihod() {
     '<button class="btn" id="pr-save">Провести поступление</button>' +
     '<button class="btn secondary" id="pr-draft">💾 Сохранить черновик</button>';
   const el = screen('Поступление товара', html, true);
+  floatSave(el, '#pr-save');
   const linesEl = el.querySelector('#pr-lines');
 
   const totals = () => {
@@ -1042,10 +1044,11 @@ async function S_invCount(docId) {
     '<button class="btn secondary" id="ic-save">💾 Сохранить подсчёт</button>' +
     '<button class="btn" id="ic-post">Провести ведомость</button>';
   const el = screen('Инвентаризация', html, true);
+  floatSave(el, '#ic-save'); // ✓ сохраняет подсчёт; проведение — кнопкой внизу
   el.querySelector('#ic-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(row => {
-      row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
+      row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
     });
   });
   const collect = () => {
@@ -1091,20 +1094,17 @@ async function S_countSheet(kind) {
     '<div class="r" style="width:110px"><input inputmode="decimal" class="fin" data-pid="' + p.id +
     '" placeholder="' + (isInv ? 'факт' : '0') + '"></div></div>').join('');
   const html =
-    '<div class="card hint small">' +
-    (isInv
-      ? 'Впиши фактическое количество по пересчитанным позициям. Пустые поля не трогаются.'
-      : 'Введи начальные остатки склада. Пустые поля не трогаются.') + '</div>' +
-    '<div class="field"><input id="cs-q" placeholder="Поиск товара…"></div>' +
     '<div class="field"><label>Дата</label><input type="date" id="cs-date" value="' + today() + '"></div>' +
+    '<div class="field"><input id="cs-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>' +
     '<button class="btn" id="cs-save">' + (isInv ? 'Провести инвентаризацию' : 'Сохранить остатки') +
     '</button>';
   const el = screen(isInv ? 'Инвентаризация' : 'Начальные остатки', html, true);
+  floatSave(el, '#cs-save');
   el.querySelector('#cs-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(r => {
-      r.style.display = !q || r.dataset.name.includes(q) ? '' : 'none';
+      r.style.display = fuzzyMatch(q, r.dataset.name) ? '' : 'none';
     });
   });
   el.querySelector('#cs-save').onclick = async () => {
@@ -1228,6 +1228,7 @@ async function S_vydacha(sid) {
     '<button class="btn" id="v-save">Выдать товар</button>' +
     '<button class="btn secondary" id="v-draft">💾 Сохранить черновик</button>';
   const el = screen('Выдача: ' + info.seller.name, html, true);
+  floatSave(el, '#v-save');
   const linesEl = el.querySelector('#v-lines');
 
   const totals = () => {
@@ -1341,6 +1342,7 @@ async function S_sdacha(sid) {
     '<div class="card" id="s-total"></div>' +
     '<button class="btn" id="s-save">Принять сдачу</button>';
   const el = screen('Сдача: ' + info.seller.name, html, true);
+  floatSave(el, '#s-save');
   const touched = {};
 
   const totals = () => {
@@ -1458,6 +1460,7 @@ async function S_transfer(fromSid) {
     '<div class="card">' + rows + '</div>' +
     '<button class="btn" id="tr-save">Передать</button>';
   const el = screen('Передача: ' + info.seller.name, html, true);
+  floatSave(el, '#tr-save');
   el.querySelector('#tr-save').onclick = async () => {
     const lines = [];
     let bad = null;
@@ -1747,7 +1750,7 @@ async function S_repStock() {
   el.querySelector('#ro-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.skrow').forEach(row => {
-      row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
+      row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
     });
   });
 }
@@ -1929,7 +1932,8 @@ function evIntersects(ev, p) {
   return ev.date_from <= p.to && (ev.date_to || ev.date_from) >= p.from;
 }
 const P_TYPES = ['Праздник', 'Рынок', 'ТЦ', 'Сеть', 'Магазин', 'Другое'];
-const E_TYPES = ['Праздник', 'Ярмарка', 'Фестиваль', 'Другое'];
+const E_TYPES = ['Праздник', 'Сельхозярмарка', 'Ярмарка коммерческая', 'Фестиваль',
+  'Другое'];
 
 function ownerLine(x) {
   return x.owner_name
@@ -2598,7 +2602,7 @@ async function S_prices() {
   el.querySelector('#pz-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(r => {
-      r.style.display = !q || r.dataset.name.includes(q) ? '' : 'none';
+      r.style.display = fuzzyMatch(q, r.dataset.name) ? '' : 'none';
     });
   });
   el.addEventListener('input', e => {
@@ -2654,7 +2658,7 @@ async function S_products() {
   el.querySelector('#p-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('#p-list .row').forEach(r => {
-      r.style.display = !q || r.textContent.toLowerCase().includes(q) ? '' : 'none';
+      r.style.display = fuzzyMatch(q, r.textContent) ? '' : 'none';
     });
     el.querySelectorAll('#p-list .pgroup').forEach(g => {
       if (q) g.classList.remove('closed'); // при поиске раскрываем всё
