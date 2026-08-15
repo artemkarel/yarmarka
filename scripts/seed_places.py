@@ -6,6 +6,7 @@
 еженедельные площадки без даты — в справочник точек. Повторный запуск
 пропускает уже загруженные записи.
 """
+import calendar
 import os
 import re
 import sys
@@ -20,7 +21,8 @@ XLSX = sys.argv[1] if len(sys.argv) > 1 else \
     os.path.expanduser("~/Downloads/yarmarki_rossiya.xlsx")
 
 EVENT_SHEETS = ["Праздники и Дни городов", "Сельхозярмарки и базары", "Коммерческие ярмарки"]
-POINT_SHEETS = ["Рынки", "Магазины и ТЦ"]
+# ТЦ, рынки и магазины пользователь ведёт вручную (импортные удалены 2026-08-15)
+POINT_SHEETS = []
 
 CITY_PREFIXES = ("г.о.", "р.п.", "пос.", "п.", "с.", "д.", "г.")
 
@@ -32,6 +34,24 @@ RE_DATE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})")
 MONTHS = [("январ", 1), ("феврал", 2), ("март", 3), ("апрел", 4), ("ма", 5), ("июн", 6),
           ("июл", 7), ("август", 8), ("сентябр", 9), ("октябр", 10), ("ноябр", 11),
           ("декабр", 12)]
+MONTH_WORD = (r"(январ\w*|феврал\w*|март\w*|апрел\w*|ма[йя]\w*|июн\w*|июл\w*|август\w*|"
+              r"сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)")
+RE_W_RANGE_2M = re.compile(  # «1 января - 23 февраля 2026»
+    r"(\d{1,2})\s+" + MONTH_WORD + r"\s*[–\-]\s*(\d{1,2})\s+" + MONTH_WORD + r"\s+(\d{4})")
+RE_W_RANGE = re.compile(  # «1 - 18 января 2026»
+    r"(\d{1,2})\s*[–\-]\s*(\d{1,2})\s+" + MONTH_WORD + r"\s+(\d{4})")
+RE_W_DATE = re.compile(r"(\d{1,2})\s+" + MONTH_WORD + r"\s+(\d{4})")  # «21 февраля 2026»
+RE_DM_TO_MONTH = re.compile(  # «30.05–сентябрь 2026»
+    r"(\d{1,2})\.(\d{1,2})\s*[–\-]\s*" + MONTH_WORD + r"\s+(\d{4})")
+RE_YEAR_ONLY = re.compile(r"^\D*(\d{4})\D*$")  # «2026 (уточнить дату)»
+
+
+def month_num(word):
+    w = str(word).lower()
+    for pref, num in MONTHS:  # порядок важен: «март» раньше «ма»
+        if w.startswith(pref):
+            return num
+    return None
 
 
 def short_city(mun):
@@ -73,6 +93,31 @@ def parse_period(raw):
     if m:
         d, mo, y = map(int, m.groups())
         return (f"{y:04d}-{mo:02d}-{d:02d}",) * 2
+    m = RE_DM_TO_MONTH.search(s)  # «30.05–сентябрь 2026»
+    if m:
+        d1, m1, mw, y = int(m.group(1)), int(m.group(2)), m.group(3), int(m.group(4))
+        mn = month_num(mw)
+        if mn:
+            return (f"{y:04d}-{m1:02d}-{d1:02d}", f"{y:04d}-{mn:02d}-28")
+    m = RE_W_RANGE_2M.search(s)  # «1 января - 23 февраля 2026»
+    if m:
+        d1, w1, d2, w2, y = (int(m.group(1)), m.group(2), int(m.group(3)), m.group(4),
+                             int(m.group(5)))
+        n1, n2 = month_num(w1), month_num(w2)
+        if n1 and n2:
+            return (f"{y:04d}-{n1:02d}-{d1:02d}", f"{y:04d}-{n2:02d}-{d2:02d}")
+    m = RE_W_RANGE.search(s)  # «1 - 18 января 2026»
+    if m:
+        d1, d2, w, y = int(m.group(1)), int(m.group(2)), m.group(3), int(m.group(4))
+        n = month_num(w)
+        if n:
+            return (f"{y:04d}-{n:02d}-{d1:02d}", f"{y:04d}-{n:02d}-{d2:02d}")
+    m = RE_W_DATE.search(s)  # «21 февраля 2026»
+    if m:
+        d, w, y = int(m.group(1)), m.group(2), int(m.group(3))
+        n = month_num(w)
+        if n:
+            return (f"{y:04d}-{n:02d}-{d:02d}",) * 2
     low = s.lower()
     ym = re.search(r"(\d{4})", s)
     if ym:
@@ -81,6 +126,40 @@ def parse_period(raw):
                 y = int(ym.group(1))
                 return (f"{y:04d}-{num:02d}-01", f"{y:04d}-{num:02d}-28")
     return None
+
+
+def _fix_date(iso):
+    """Чинит перелёты вроде «30 февраля»: день зажимается в границы месяца."""
+    try:
+        y, m, d = map(int, iso.split("-"))
+    except ValueError:
+        return None
+    # шаблон на 2026 год: даты вне 2025–2027 — опечатки исходника, не сеем
+    if not 1 <= m <= 12 or not 2025 <= y <= 2027:
+        return None
+    d = min(max(d, 1), calendar.monthrange(y, m)[1])
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+
+def parse_periods(raw):
+    """Все даты/диапазоны из ячейки (строки вида «21 февраля 2026; 9 мая 2026; …»
+    дают несколько событий). Пусто — дат нет; голый год — событие на весь год."""
+    if not raw:
+        return []
+    out = []
+    for seg in re.split(r"[;\n]+", str(raw)):
+        p = parse_period(seg)
+        if not p:
+            continue
+        a, b = _fix_date(p[0]), _fix_date(p[1])
+        if a and b:
+            out.append((a, b) if b >= a else (a, a))
+    if not out:
+        m = RE_YEAR_ONLY.match(str(raw).strip())
+        if m:
+            y = int(m.group(1))
+            out.append((f"{y:04d}-01-01", f"{y:04d}-12-31"))
+    return out
 
 
 def build_comment(*parts):
@@ -126,16 +205,17 @@ def main():
             if etype == "Ярмарка":
                 etype = ("Ярмарка коммерческая" if sheet == "Коммерческие ярмарки"
                          else "Сельхозярмарка")
-            dates = parse_period(period)
-            comment = build_comment(place if dates else None, contact, phone, cost, site,
-                                    None if dates else period)
-            if dates:
-                if event_exists(name, city, dates[0]):
-                    skipped += 1
-                    continue
-                services.event_save(conn, fake_user, None, name, etype,
-                                    city, dates[0], dates[1], None, comment)
-                ev_added += 1
+            dates_list = parse_periods(period)
+            comment = build_comment(place if dates_list else None, contact, phone, cost, site,
+                                    None if dates_list else period)
+            if dates_list:
+                for d1, d2 in dates_list:
+                    if event_exists(name, city, d1):
+                        skipped += 1
+                        continue
+                    services.event_save(conn, fake_user, None, name, etype,
+                                        city, d1, d2, None, comment)
+                    ev_added += 1
             else:
                 # постоянные/еженедельные площадки без даты — в точки
                 add_point(name, str(etype or "Ярмарка").strip(), city,
