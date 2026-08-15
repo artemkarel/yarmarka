@@ -130,8 +130,10 @@ details.doc .doclines{ padding:0 14px 12px; }
 .sheet{ position:fixed; left:0; right:0; bottom:0; background:var(--card); z-index:70;
   border-radius:22px 22px 0 0; padding:10px 16px calc(16px +
   max(env(safe-area-inset-bottom), var(--tg-safe-area-inset-bottom, 0px)));
-  max-height:78vh; overflow-y:auto; max-width:640px; margin:0 auto;
+  max-height:78vh; overflow-y:auto; overflow-x:hidden; max-width:640px; margin:0 auto;
+  overscroll-behavior:contain; touch-action:pan-y;
   animation:sheetUp .22s ease; box-shadow:0 -10px 40px rgba(0,0,0,.25); }
+body.sheet-open{ overflow:hidden; }
 @keyframes sheetUp{ from{ transform:translateY(40%); opacity:.5; } to{ transform:none; opacity:1; } }
 .sheethandle{ width:38px; height:4px; border-radius:2px; background:var(--sep);
   margin:2px auto 12px; }
@@ -139,7 +141,8 @@ details.doc .doclines{ padding:0 14px 12px; }
 .shsec{ font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--hint);
   font-weight:700; margin:14px 0 8px; }
 .chipwrap{ display:flex; flex-wrap:wrap; gap:6px; }
-.chipwrap .chip{ background:var(--bg); }
+.chipwrap .chip{ background:var(--bg); max-width:100%; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; }
 .chipwrap .chip.on{ background:var(--accent); color:var(--accent-text); }
 .sheetfoot{ display:grid; grid-template-columns:1fr 1.4fr; gap:8px; margin-top:18px; }
 
@@ -150,6 +153,7 @@ details.doc .doclines{ padding:0 14px 12px; }
 .searchrow input:focus{ border:none; }
 .searchrow button{ flex:none; border:none; background:transparent; font-size:20px;
   padding:8px 10px; cursor:pointer; position:relative; color:var(--text); }
+.searchrow button svg{ display:block; }
 .searchrow button #fl-n{ position:absolute; top:2px; right:2px; background:var(--accent);
   color:var(--accent-text); font-size:10px; font-weight:800; border-radius:8px;
   min-width:15px; height:15px; line-height:15px; text-align:center; }
@@ -203,8 +207,8 @@ details.doc .doclines{ padding:0 14px 12px; }
 
 #app{ position:relative; }
 #screen{ will-change:transform; }
-#screen.dragging{ background:var(--bg); position:relative; z-index:1; min-height:85vh;
-  box-shadow:-12px 0 32px rgba(0,0,0,.18); }
+#screen.dragging{ background:var(--bg); position:relative; z-index:1; min-height:100vh;
+  border-radius:28px 0 0 28px; box-shadow:-14px 0 44px rgba(0,0,0,.30); }
 #screen.anim-push{ animation:scrPush .26s cubic-bezier(.3,.7,.3,1) both; }
 @keyframes scrPush{ from{ transform:translateX(60px); opacity:0; }
   to{ transform:translateX(0); opacity:1; } }

@@ -186,10 +186,15 @@ function screen(title, html, sub) {
       el.offsetWidth + 'px; top:' + el.offsetTop + 'px; bottom:0; overflow:hidden; ' +
       'z-index:0; pointer-events:none; opacity:.9; transform:translateX(-24%);';
     under.innerHTML = '<div style="transform:translateY(-' + (prev.scrollY || 0) + 'px)">' +
-      prev.html + '</div>';
+      prev.html + '</div>' +
+      // затемнение нижнего экрана — рассеивается по мере свайпа, как в iOS
+      '<div class="under-dim" style="position:absolute;inset:0;background:#000;' +
+      'opacity:.22;pointer-events:none"></div>';
     el.parentElement.insertBefore(under, el);
     el.classList.add('dragging');
   }
+
+  const underDim = () => under && under.querySelector('.under-dim');
 
   function dropUnder(delay) {
     const u = under;
@@ -210,12 +215,15 @@ function screen(title, html, sub) {
     const ok = dx > 70 || (dx > 30 && speed > 0.45);
     if (ok && !backBusy) {
       backBusy = true;
-      el.style.transition = 'transform .16s ease';
-      el.style.transform = 'translateX(100%)';
+      // окно доезжает до конца целиком — как системный «назад» в iOS
+      el.style.transition = 'transform .24s cubic-bezier(.2,.7,.3,1)';
+      el.style.transform = 'translateX(105%)';
       if (under) {
-        under.style.transition = 'transform .16s ease, opacity .16s ease';
+        under.style.transition = 'transform .24s cubic-bezier(.2,.7,.3,1), opacity .24s ease';
         under.style.transform = 'translateX(0)';
         under.style.opacity = '1';
+        const dim = underDim();
+        if (dim) { dim.style.transition = 'opacity .24s ease'; dim.style.opacity = '0'; }
       }
       setTimeout(() => {
         el.style.transition = '';
@@ -227,13 +235,15 @@ function screen(title, html, sub) {
         dropUnder(40);
         backBusy = false;
         if (tg) { if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide(); }
-      }, 150);
+      }, 240);
     } else {
       el.style.transition = 'transform .18s ease';
       el.style.transform = 'translateX(0)';
       if (under) {
-        under.style.transition = 'transform .18s ease';
+        under.style.transition = 'transform .18s ease, opacity .18s ease';
         under.style.transform = 'translateX(-24%)';
+        const dim = underDim();
+        if (dim) { dim.style.transition = 'opacity .18s ease'; dim.style.opacity = '.22'; }
       }
       dropUnder(200);
       setTimeout(() => { el.style.transition = ''; el.style.transform = ''; }, 200);
@@ -244,7 +254,7 @@ function screen(title, html, sub) {
     t0 = null;
     if (stack.length < 2 || backBusy) return;
     // горизонтальным лентам (календарь, чипсы) не мешаем
-    if (e.target.closest('.dstrip, .chips')) return;
+    if (e.target.closest('.dstrip, .chips, .sheet, .sheetbg')) return;
     const t = e.touches[0];
     // жест — строго от левой кромки экрана, поверх любых элементов;
     // обычный тап не страдает: жест включается только после уверенного сдвига
@@ -273,6 +283,8 @@ function screen(title, html, sub) {
       const prog = Math.min(1, Math.max(0, dx / el.offsetWidth));
       under.style.transform = 'translateX(' + (-24 + 24 * prog) + '%)';
       under.style.opacity = String(0.85 + 0.15 * prog);
+      const dim = underDim();
+      if (dim) dim.style.opacity = String(0.22 * (1 - prog));
     }
     t0.dx = dx;
   }, { passive: false });
@@ -1727,17 +1739,21 @@ function openFilterSheet(opts) {
     '">' + esc(label) + '</button>';
   const draw = () => {
     const cityQ = (sh.querySelector('#sh-cq') || {}).value || '';
-    const cities = opts.cities.filter(c =>
-      !cityQ.trim() || c.toLowerCase().includes(cityQ.toLowerCase().trim()));
+    const q = cityQ.toLowerCase().trim();
+    // без запроса показываем только выбранные города; при вводе — подсказки
+    const cityChips = q
+      ? opts.cities.filter(c => c.toLowerCase().includes(q)).slice(0, 12)
+      : opts.sel.citySel.slice();
     sh.innerHTML =
       '<div class="sheethandle"></div>' +
       '<h3 style="margin-bottom:10px">Фильтры</h3>' +
       '<div class="shsec">Город</div>' +
-      '<div class="field"><input id="sh-cq" placeholder="🔍 Поиск города…" value="' +
+      '<div class="field"><input id="sh-cq" placeholder="Введите город…" value="' +
       esc(cityQ) + '" autocomplete="off"></div>' +
-      '<div class="chipwrap">' +
-      cities.slice(0, 60).map(c =>
-        chip('shc', c, c, opts.sel.citySel.includes(c))).join('') + '</div>' +
+      (cityChips.length
+        ? '<div class="chipwrap">' + cityChips.map(c =>
+            chip('shc', c, c, opts.sel.citySel.includes(c))).join('') + '</div>'
+        : (q ? '<div class="hint small">Город не найден</div>' : '')) +
       '<div class="shsec">Вид</div><div class="chipwrap">' +
       opts.types.map(t => chip('sht', t, t, opts.sel.typeSel.includes(t))).join('') + '</div>' +
       '<div class="shsec">Кто едет</div><div class="chipwrap">' +
@@ -1757,7 +1773,10 @@ function openFilterSheet(opts) {
       cq2.setSelectionRange(pos, pos);
     });
   };
-  const close = () => { bg.remove(); sh.remove(); opts.onClose(); };
+  const close = () => {
+    document.body.classList.remove('sheet-open');
+    bg.remove(); sh.remove(); opts.onClose();
+  };
   bg.onclick = close;
   sh.addEventListener('click', e => {
     if (e.target.id === 'sh-reset') {
@@ -1777,8 +1796,14 @@ function openFilterSheet(opts) {
     if (w && val !== 'free') val = +val;
     const i = arr.indexOf(val);
     if (i >= 0) arr.splice(i, 1); else arr.push(val);
+    if (c && i < 0) {
+      const cq = sh.querySelector('#sh-cq');
+      if (cq) cq.value = ''; // город выбран из подсказок — очищаем поиск
+    }
     draw();
   });
+  bg.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+  document.body.classList.add('sheet-open');
   document.body.appendChild(bg);
   document.body.appendChild(sh);
   draw();
@@ -1810,6 +1835,7 @@ async function S_places() {
   const typeOptions = [...new Set(
     allEvents.map(x => x.etype || 'Другое').concat(allPoints.map(x => x.ptype || 'Другое'))
   )].sort();
+  if (PL_STATE.calMode !== 'day') { PL_STATE.calMode = 'day'; PL_STATE.selKey = null; }
   if (!PL_STATE.selKey) PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
   const items = calItems(PL_STATE.calMode);
   if (!items.some(it => it.key === PL_STATE.selKey)) {
@@ -1835,20 +1861,22 @@ async function S_places() {
       '<div class="dw' + (it.we ? ' we' : '') + '">' + it.dw + '</div>' +
       '<div class="dn">' + it.dn + '</div></div>';
   }).join('');
-  const modes = [['day', 'По дням'], ['month', 'По месяцам']];
   const html =
     '<div class="calwrap"><div class="calbar">' +
     '<div class="calmonth" id="cal-month"></div>' +
     '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
     '<button class="calarr left" id="cal-prev">‹</button>' +
     '<button class="calarr right" id="cal-next">›</button></div>' +
-    '<div class="seg" id="cal-mode">' + modes.map(m =>
-      '<button' + (PL_STATE.calMode === m[0] ? ' class="on"' : '') + ' data-mode="' + m[0] +
-      '">' + m[1] + '</button>').join('') + '</div>' +
     '<div class="searchrow"><span class="sico">🔍</span>' +
     '<input id="pl-q" placeholder="Поиск точек и мероприятий…" autocomplete="off" value="' +
     esc(PL_STATE.q || '') + '">' +
-    '<button id="fl-open" title="Фильтры">🎚<span id="fl-n"></span></button></div>' +
+    '<button id="fl-open" title="Фильтры">' +
+    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
+    '<path d="M3.5 8h17M3.5 16h17"/>' +
+    '<circle cx="10" cy="8" r="3.1" fill="currentColor" stroke="none"/>' +
+    '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
+    '<span id="fl-n"></span></button></div>' +
     '<div class="addline"><span data-add="event">+ мероприятие</span>' +
     '<span data-add="point">+ точка</span></div>' +
     '<div id="pl-list">' + listBlock() + '</div>';
@@ -1983,13 +2011,6 @@ async function S_places() {
   el.querySelector('#cal-next').onclick = () => {
     stripEl.scrollLeft += stripEl.clientWidth * 0.8;
   };
-  el.querySelector('#cal-mode').addEventListener('click', e => {
-    const b = e.target.closest('[data-mode]');
-    if (!b) return;
-    PL_STATE.calMode = b.dataset.mode;
-    PL_STATE.selKey = calDefaultKey(PL_STATE.calMode);
-    render();
-  });
 }
 
 function ownerSelect(id, meta, current) {
