@@ -17,7 +17,14 @@ html,body{ background:var(--bg); color:var(--text);
   padding:calc(10px + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px))
     12px
     calc(104px + max(env(safe-area-inset-bottom), var(--tg-safe-area-inset-bottom, 0px))); }
-.splash{ text-align:center; color:var(--hint); padding:48px 0; }
+.splash{ display:flex; align-items:center; justify-content:center; min-height:70vh;
+  text-align:center; color:var(--hint); }
+/* логотип красится в цвет темы через маску: чёрный днём, белый в тёмной теме */
+.splash-logo{ width:200px; aspect-ratio:420/265; background:var(--text);
+  -webkit-mask:url(logo.png) center/contain no-repeat;
+  mask:url(logo.png) center/contain no-repeat;
+  animation:logoPulse 1.5s ease-in-out infinite; }
+@keyframes logoPulse{ 0%,100%{ opacity:.9; } 50%{ opacity:.4; } }
 
 .pagetitle{ font-size:26px; font-weight:800; margin:8px 4px 14px; }
 .subhead{ display:flex; align-items:center; gap:8px; margin:4px 0 14px; }

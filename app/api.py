@@ -822,7 +822,7 @@ def api_settings_put(request: Request, payload: dict = Body(...)):
 def index():
     """Отдаём index.html без кэша и с версией статики — чтобы Telegram не показывал старьё."""
     html = (config.WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
-    v = int((config.WEBAPP_DIR / "app.js").stat().st_mtime)
+    v = max(int((config.WEBAPP_DIR / n).stat().st_mtime) for n in ("app.js", "style.css"))
     html = html.replace('src="app.js"', f'src="app.js?v={v}"')
     html = html.replace('href="style.css"', f'href="style.css?v={v}"')
     return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
