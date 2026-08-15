@@ -2063,7 +2063,10 @@ function ptCardHtml(pt, n) {
     '<div><b>' + n + '. ' + esc(pt.name) + '</b></div>' +
     '<div class="plfoot"><div class="sub hint small">' +
     ([esc(pt.address || ''), esc(pt.city)].filter(Boolean).join(', ') || 'адрес не указан') +
-    '</div>' + bookingsLine(pt) + '</div>' + form + '</div>' +
+    '</div>' +
+    (isBooked(pt) ? '' : '<div class="sub small" style="margin-top:4px">' + ownerLine(pt) +
+      '</div>') +
+    bookingsLine(pt) + '</div>' + form + '</div>' +
     bookBtnHtml(pt, 'data-book') + '</div>';
 }
 
