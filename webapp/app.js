@@ -167,8 +167,8 @@ function screen(title, html, sub) {
   const old = document.getElementById('screen');
   const el = old.cloneNode(false);
   old.replaceWith(el);
-  const fb = document.querySelector('.fab-bar');
-  if (fb) fb.remove(); // плавающие кнопки живут в body — чистим при смене экрана
+  // плавающие панели живут в body — чистим при смене экрана
+  document.querySelectorAll('.fab-bar, .chatbar').forEach(n => n.remove());
   const head = sub
     ? '<div class="subhead"><button class="backbtn" onclick="back()">‹</button>' +
       '<div class="subtitle">' + esc(title) + '</div></div>'
@@ -2265,17 +2265,20 @@ function openMonthSheet(selKey, onPick) {
 const AI_STATE = { msgs: [] }; // история живёт, пока открыто приложение
 
 async function S_aiChat() {
-  const html =
-    '<div id="chat-log"></div>' +
-    '<div class="chatbar"><input id="chat-in" placeholder="Куда поехать в выходные?"' +
-    ' autocomplete="off">' +
+  const el = screen('Помощник', '<div id="chat-log"></div>', true);
+  // панель ввода — в body: у #screen есть will-change:transform, из-за него
+  // fixed-элементы внутри него позиционируются от экрана, а не от окна
+  const bar = document.createElement('div');
+  bar.className = 'chatbar';
+  bar.innerHTML =
+    '<input id="chat-in" placeholder="Куда поехать в выходные?" autocomplete="off">' +
     '<button id="chat-send" aria-label="Отправить">' +
     '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
     ' stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
-    '<path d="M21 3 10 14"/><path d="M21 3 14 21l-4-7-7-4Z"/></svg></button></div>';
-  const el = screen('Помощник', html, true);
+    '<path d="M21 3 10 14"/><path d="M21 3 14 21l-4-7-7-4Z"/></svg></button>';
+  document.body.appendChild(bar);
   const log = el.querySelector('#chat-log');
-  const inp = el.querySelector('#chat-in');
+  const inp = bar.querySelector('#chat-in');
   const bubble = (m, i) =>
     '<div class="msg ' + (m.role === 'user' ? 'me' : 'bot') + '">' +
     esc(m.content).replace(/\n/g, '<br>') + '</div>';
@@ -2304,7 +2307,7 @@ async function S_aiChat() {
     }
     draw(false);
   };
-  el.querySelector('#chat-send').onclick = send;
+  bar.querySelector('#chat-send').onclick = send;
   inp.addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); send(); }
   });
