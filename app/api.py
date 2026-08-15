@@ -396,6 +396,16 @@ def api_doc(doc_id: int, request: Request):
     return {"doc": _with_print(doc)}
 
 
+@app.delete("/api/docs/{doc_id}")
+def api_doc_delete(doc_id: int, request: Request):
+    u = current_user(request)
+    need_staff(u)
+    doc = services.doc_get(db.get(), doc_id)
+    if doc["type"] == "cash":
+        need_owner(u)
+    return services.doc_delete(db.get(), u, doc_id)
+
+
 @app.get("/print/{doc_id}/{sig}", response_class=HTMLResponse)
 def print_vydacha(doc_id: int, sig: str):
     """Печатная форма УПД по выдаче. Доступ по подписанной ссылке из приложения."""

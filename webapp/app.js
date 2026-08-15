@@ -332,7 +332,7 @@ function bindMenu(el, handlers) {
   });
 }
 
-function docCard(d, showSeller) {
+function docCard(d, showSeller, canDelete) {
   const meta = DOC_META[d.type] || ['📄', d.type];
   let sum = '';
   if (d.type === 'prihod') sum = 'на ' + fmtM(d.amount) + ' по ценам продажи' +
@@ -347,7 +347,10 @@ function docCard(d, showSeller) {
   const who = (showSeller && d.seller_name) ? esc(d.seller_name) + ' • ' : '';
   return '<details class="doc" ontoggle="onDocToggle(event,' + d.id + ')">' +
     '<summary><div class="dochead"><div><b>' + meta[0] + ' ' + meta[1] + '</b></div>' +
-    '<div class="dt">' + dstr(d.date) + '</div></div>' +
+    '<div class="dt">' + dstr(d.date) +
+    (canDelete ? ' <button class="chip" style="padding:4px 9px" data-docdel="' + d.id +
+      '" data-docname="' + meta[1] + ' от ' + dstr(d.date) + '">🗑</button>' : '') +
+    '</div></div>' +
     '<div class="sub hint small">' + who + sum +
     (d.comment ? ' • ' + esc(d.comment) : '') + '</div></summary>' +
     '<div class="doclines hint small">Загрузка…</div></details>';
@@ -2148,12 +2151,25 @@ async function S_docs() {
   const chips = types.map(t =>
     '<button class="chip' + (DOCS_STATE.type === t[0] ? ' on' : '') + '" data-t="' + t[0] + '">' +
     t[1] + '</button>').join('');
-  const el = screen('Документы',
+  const el = screen('Документы и отчёты',
     '<div class="chips">' + chips + '</div>' +
-    (r.docs.length ? r.docs.map(d => docCard(d, true)).join('')
+    (r.docs.length ? r.docs.map(d => docCard(d, true, true)).join('')
       : '<div class="card hint">Документов нет</div>'), true);
-  el.querySelector('.chips').addEventListener('click', e => {
-    const c = e.target.closest('.chip');
+  el.addEventListener('click', async e => {
+    const del = e.target.closest('[data-docdel]');
+    if (del) {
+      e.preventDefault(); // не раскрывать документ под кнопкой
+      if (!(await confirmDlg('Удалить документ «' + del.dataset.docname +
+        '»? Остатки и балансы будут пересчитаны, как будто его не было.'))) return;
+      try {
+        await api('/api/docs/' + del.dataset.docdel, 'DELETE');
+        toast('Документ удалён ✓', true);
+        PRODUCTS_CACHE = null;
+        render();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    const c = e.target.closest('.chip[data-t]');
     if (!c) return;
     DOCS_STATE.type = c.dataset.t;
     render();

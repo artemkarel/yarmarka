@@ -575,6 +575,48 @@ def docs_list(conn, dtype=None, seller_id=None, limit=100):
     return [dict(r) for r in conn.execute(q, args)]
 
 
+def doc_delete(conn, user, doc_id):
+    """Удаление документа со сторно: остатки и балансы возвращаются как до него.
+    Если товар по документу уже израсходован дальше — удалить нельзя."""
+    d = doc_get(conn, doc_id)
+    t = d["type"]
+    sid = d["seller_id"]
+    with _lock, conn:
+        for l in d["lines"]:
+            pid = l["product_id"]
+            if t == "prihod":
+                have = _stock_qty(conn, pid)
+                if l["qty"] > have + EPS:
+                    raise ValueError(f"{l['name']}: нельзя удалить — товар из этого "
+                                     "поступления уже израсходован со склада")
+                _stock_set(conn, pid, have - l["qty"])
+            elif t in ("initial", "inventory"):
+                if l["qty_before"] is not None:
+                    _stock_set(conn, pid, l["qty_before"])
+            elif t == "vydacha":
+                hands, shelf = _sstock(conn, sid, pid)
+                if l["qty"] > hands + EPS:
+                    raise ValueError(f"{l['name']}: нельзя удалить — продавец уже сдал "
+                                     "или продал этот товар")
+                _sstock_set(conn, sid, pid, hands - l["qty"], shelf + l["qty_shelf"])
+                q_wh = l["qty"] - l["qty_shelf"]
+                if q_wh > EPS:
+                    _stock_set(conn, pid, _stock_qty(conn, pid) + q_wh)
+            elif t == "sdacha":
+                hands, shelf = _sstock(conn, sid, pid)
+                if l["qty_to_wh"] > _stock_qty(conn, pid) + EPS:
+                    raise ValueError(f"{l['name']}: нельзя удалить — возвращённый товар "
+                                     "уже ушёл со склада")
+                if l["qty_to_shelf"] > shelf + EPS:
+                    raise ValueError(f"{l['name']}: нельзя удалить — товар с полки "
+                                     "уже выдан заново")
+                _stock_set(conn, pid, _stock_qty(conn, pid) - l["qty_to_wh"])
+                _sstock_set(conn, sid, pid, hands + l["qty"], shelf - l["qty_to_shelf"])
+        conn.execute("DELETE FROM doc_lines WHERE doc_id=?", (doc_id,))
+        conn.execute("DELETE FROM docs WHERE id=?", (doc_id,))
+    return {"deleted": True}
+
+
 # ---------- деньги ----------
 
 def seller_balance(conn, seller_id):
