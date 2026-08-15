@@ -352,14 +352,22 @@ const NAV_ICONS = {
   menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>',
 };
 
+// совладелец/админ с галочкой «выезжает торговать» может смотреть на приложение
+// глазами продавца — переключатель в «Ещё»; права на сервере не меняются
+function viewRole() {
+  return ME && ME.role !== 'seller' && ME.trades &&
+    localStorage.getItem('ya_view') === 'seller' ? 'seller' : ME.role;
+}
+
 function buildNav() {
-  const ownerish = ME.role === 'admin' || ME.role === 'owner';
+  const role = viewRole();
+  const ownerish = role === 'admin' || role === 'owner';
   let items;
-  if (ME.role === 'seller') {
+  if (role === 'seller') {
     items = [['home', 'Главная', S_home], ['box', 'Склад', S_skladView],
              ['pin', 'Точки', S_places], ['chart', 'Аналитика', S_turnover],
              ['menu', 'Ещё', S_more]];
-  } else if (ME.role === 'keeper') {
+  } else if (role === 'keeper') {
     items = [['box', 'Склад', S_sklad], ['people', 'Реализация', S_realiz],
              ['chart', 'Аналитика', S_analytics], ['menu', 'Ещё', S_more]];
   } else {
@@ -378,6 +386,26 @@ function buildNav() {
     b.onclick = () => setTab(items[i][2], i);
   });
   setTab(items[0][2], 0);
+  updateRealizBadge();
+}
+
+// красный кружок на вкладке «Реализация»: сколько сотрудников ждут расчёта
+function updateRealizBadge() {
+  if (!ME || !(ME.role === 'admin' || ME.role === 'owner')) return;
+  api('/api/sellers').then(r => {
+    const n = r.sellers.filter(s => Math.abs(s.balance) > 0.005).length;
+    const btn = [...document.querySelectorAll('#nav button')]
+      .find(b => b.textContent.includes('Реализация'));
+    if (!btn) return;
+    let dot = btn.querySelector('.navdot');
+    if (!n) { if (dot) dot.remove(); return; }
+    if (!dot) {
+      dot = document.createElement('span');
+      dot.className = 'navdot';
+      btn.appendChild(dot);
+    }
+    dot.textContent = n;
+  }).catch(() => { /* не критично */ });
 }
 
 // ===== общие блоки =====
@@ -390,18 +418,14 @@ function balanceHtml(b, self) {
   } else if (b.balance < -0.005) {
     big = self ? 'Компания должна тебе' : 'Компания должна';
     cls = 'red';
-  } else { big = 'Расчёт закрыт'; cls = ''; }
+  } else { big = self ? 'Ты должен компании' : 'Должен компании'; cls = ''; }
   const row = (l, v, c) => '<div class="row"><div class="l hint">' + l +
     '</div><div class="r val ' + (c || '') + '">' + v + '</div></div>';
-  // продавцу «начислено» не показываем — система считает долю внутри себя
-  const detail = self
-    ? row('Взял товара на', fmtM(b.taken_value)) +
-      row('Возврат товара', '− ' + fmtM(b.returned_credit)) +
-      row('Продал на', fmtM(b.sold_value))
-    : row('Взял товара на', fmtM(b.taken_value)) +
-      row('Продал на', fmtM(b.sold_value)) +
-      row('Начислено (' + SETTINGS.share_pct + '%)', '+ ' + fmtM(b.charged)) +
-      row('Возврат товара', '− ' + fmtM(b.returned_credit));
+  // «начислено» не показываем — система считает долю внутри себя
+  const detail =
+    row('Взял товара на', fmtM(b.taken_value)) +
+    row('Возврат товара', '− ' + fmtM(b.returned_credit)) +
+    row('Продал на', fmtM(b.sold_value));
   return '<div class="card">' +
     '<div class="biglabel">' + big + '</div>' +
     '<div class="bignum ' + cls + '">' + fmtM(Math.abs(b.balance)) + '</div>' +
@@ -1276,7 +1300,7 @@ async function S_countSheet(kind) {
 // ===== продавцы =====
 // вкладка «Реализация» — меню в стиле склада
 async function S_realiz() {
-  const html = menuRows([
+  const html = '<div id="rz-alert"></div>' + menuRows([
     ['sellers', 'people', 'По сотрудникам'],
     ['vyd', 'arrowup', 'Выдать товар'],
     ['sd', 'arrowdown', 'Принять товар'],
@@ -1289,6 +1313,26 @@ async function S_realiz() {
     sd: () => push(S_chooseSeller, 'sdacha'),
     prices: () => push(S_prices),
   });
+  // совладельцу и админу — напоминание обработать расчёты с сотрудниками
+  if (ME.role === 'admin' || ME.role === 'owner') {
+    api('/api/sellers').then(r => {
+      const need = r.sellers.filter(s => Math.abs(s.balance) > 0.005);
+      const box = el.querySelector('#rz-alert');
+      if (!box || !need.length) return;
+      box.innerHTML = '<div class="card" style="border-left:4px solid var(--accent)">' +
+        '<h3>💰 Требуют расчёта</h3>' + need.map(s =>
+          '<div class="row" data-sid="' + s.id + '" style="cursor:pointer">' +
+          '<div class="l name small">' + esc(s.name) + '</div>' +
+          '<div class="r val ' + (s.balance > 0 ? 'green' : 'red') + '">' +
+          (s.balance > 0 ? 'принять ' + fmtM(s.balance)
+            : 'выплатить ' + fmtM(-s.balance)) + '</div></div>').join('') +
+        '</div>';
+      box.onclick = ev => {
+        const c = ev.target.closest('[data-sid]');
+        if (c) push(S_seller, +c.dataset.sid);
+      };
+    }).catch(() => { /* без сети обойдёмся без плашки */ });
+  }
 }
 
 async function S_sellers() {
@@ -2644,7 +2688,7 @@ function pillRowHtml(sel, qid, withMap) {
     'Фильтры<span class="pilln" id="fl-n"></span></button>' +
     '<button class="pill' + (sel.typeSel.length ? ' on' : '') + '" id="et-open">' +
     '<span id="et-label">' + esc(etText(sel)) + '</span><span class="pv">⌄</span></button>' +
-    (withMap ? '<button class="pill mappill" id="map-open">Карта</button>' : '') +
+    (withMap ? '<button class="pill mappill" id="map-open">🗺 Карта</button>' : '') +
     '</div>';
 }
 
@@ -3148,21 +3192,27 @@ async function S_pointEdit(pt, meta, scrollToBooking) {
 
 // ===== ещё =====
 async function S_more() {
-  const admin = ME.role === 'admin';
-  const ownerish = admin || ME.role === 'owner';
-  const seller = ME.role === 'seller';
+  const vrole = viewRole();
+  const admin = vrole === 'admin';
+  const ownerish = admin || vrole === 'owner';
+  const seller = vrole === 'seller';
+  const canSwitch = ME.trades && ME.role !== 'seller';
   const roleName = { admin: 'администратор', owner: 'совладелец', keeper: 'кладовщик',
     seller: 'продавец' }[ME.role] || ME.role;
-  const showUsers = admin || ME.role === 'keeper';
-  const items = seller
+  const showUsers = admin || vrole === 'keeper';
+  const items = (seller
     ? [['history', 'clock', 'История моих операций']]
     : (ownerish ? [['exp', 'card', 'Расходы'], ['push', 'bell', 'Рассылка сотрудникам']] : [])
       .concat([['docs', 'book', 'Журнал'], ['reports', 'file', 'Отчёты']])
       .concat(showUsers ? [['users', 'people', 'Пользователи']] : [])
-      .concat(admin ? [['set', 'gear', 'Настройки']] : []);
+      .concat(admin ? [['set', 'gear', 'Настройки']] : []))
+    .concat(canSwitch
+      ? [['mode', 'swap', seller ? 'Вернуться в полный интерфейс' : 'Интерфейс продавца']]
+      : []);
   const html = menuRows(items) +
     '<div class="hint small" style="text-align:center;margin-top:16px">' +
-    esc(ME.first_name + ' ' + ME.last_name) + ' • ' + roleName + '</div>';
+    esc(ME.first_name + ' ' + ME.last_name) + ' • ' + roleName +
+    (seller && canSwitch ? ' (режим продавца)' : '') + '</div>';
   const el = screen('', html);
   bindMenu(el, {
     history: () => push(S_history),
@@ -3172,6 +3222,12 @@ async function S_more() {
     exp: () => push(S_expenses),
     push: () => push(S_broadcast),
     set: () => push(S_settings),
+    mode: () => {
+      const now = viewRole() === 'seller';
+      localStorage.setItem('ya_view', now ? 'full' : 'seller');
+      toast(now ? 'Полный интерфейс ✓' : 'Интерфейс продавца ✓', true);
+      buildNav();
+    },
   });
 }
 
@@ -3623,6 +3679,10 @@ async function S_users() {
         roles.map(x => '<option value="' + x[0] + '"' + (u.role === x[0] ? ' selected' : '') +
           '>' + x[1] + '</option>').join('') +
         (u.role === 'admin' && ME.role !== 'admin' ? '' : '') + '</select>' +
+        (u.role !== 'seller'
+          ? '<button class="chip' + (u.trades ? ' on' : '') + '" data-trd="' + u.id +
+            '" title="Выезжает торговать">🛒</button>'
+          : '') +
         '<button class="chip" data-tgl="' + u.id + '">' + (u.active ? '⏸' : '▶️') + '</button>';
     return '<div class="row"><div class="l"><div class="name small">' +
       esc(u.first_name + ' ' + u.last_name) +
@@ -3652,6 +3712,17 @@ async function S_users() {
     } catch (err) { toast(err.message); render(); }
   });
   el.addEventListener('click', async e => {
+    const t = e.target.closest('[data-trd]');
+    if (t) {
+      const u = r.users.find(x => x.id === +t.dataset.trd);
+      try {
+        const rr = await api('/api/users/' + u.id, 'PUT', { trades: u.trades ? 0 : 1 });
+        toast(rr.user.trades ? 'Выезжает торговать ✓' : 'Больше не торгует', true);
+        if (u.id === ME.id) ME = rr.user; // переключатель в «Ещё» появится сразу
+        render();
+      } catch (err) { toast(err.message); }
+      return;
+    }
     const b = e.target.closest('[data-tgl]');
     if (!b) return;
     const u = r.users.find(x => x.id === +b.dataset.tgl);
@@ -3784,8 +3855,12 @@ async function boot() {
     return;
   }
   try {
+    const t0 = performance.now();
     const r = await api('/api/auth', 'POST',
       { tz: Intl.DateTimeFormat().resolvedOptions().timeZone || '' });
+    // логотип на сплэше держим ~1.3 с — чтобы успевал читаться, но не задерживал
+    const left = 1300 - (performance.now() - t0);
+    if (left > 0) await new Promise(res => setTimeout(res, left));
     if (r.need_registration) { S_reg(r.tg || {}); return; }
     ME = r.user;
     SETTINGS = r.settings;

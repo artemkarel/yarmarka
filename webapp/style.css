@@ -211,6 +211,10 @@ details.doc .doclines{ padding:0 14px 12px; }
   font-size:inherit; cursor:pointer; padding:0; text-decoration:underline; }
 .citylink{ color:var(--accent); font-weight:700; text-decoration:underline;
   cursor:pointer; }
+#nav button{ position:relative; }
+.navdot{ position:absolute; top:3px; right:16%; background:#e53935; color:#fff;
+  border-radius:99px; min-width:16px; height:16px; font-size:10px; font-weight:700;
+  display:flex; align-items:center; justify-content:center; padding:0 4px; }
 .place .pl-main{ min-width:0; }
 .place .plfoot{ padding-right:96px; }
 .bookbtn{ position:absolute; right:12px; bottom:12px; border:none; background:var(--accent);

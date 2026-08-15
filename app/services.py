@@ -229,7 +229,7 @@ def user_create_manual(conn, first_name, last_name, role, tg_id=None, username=N
     return user_by_tg(conn, tg_id)
 
 
-def user_update(conn, uid, role=None, active=None):
+def user_update(conn, uid, role=None, active=None, trades=None):
     if user_by_id(conn, uid) is None:
         raise ValueError("Пользователь не найден")
     with _lock, conn:
@@ -239,6 +239,8 @@ def user_update(conn, uid, role=None, active=None):
             conn.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
         if active is not None:
             conn.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, uid))
+        if trades is not None:
+            conn.execute("UPDATE users SET trades=? WHERE id=?", (1 if trades else 0, uid))
     return user_by_id(conn, uid)
 
 
@@ -1088,8 +1090,10 @@ def seller_balance(conn, seller_id):
 
 def sellers_overview(conn):
     out = []
+    # торгуют и обычные продавцы, и совладельцы/админы с галочкой «выезжает торговать»
     for u in conn.execute(
-        "SELECT * FROM users WHERE role='seller' AND active=1 ORDER BY first_name"
+        "SELECT * FROM users WHERE active=1 AND (role='seller' OR trades=1)"
+        " ORDER BY first_name"
     ):
         u = dict(u)
         st = seller_stock(conn, u["id"])
@@ -1792,25 +1796,67 @@ def _asst_parse(conn, text, today):
     cities = [r["c"] for r in conn.execute(
         "SELECT DISTINCT city c FROM events WHERE city != '' "
         "UNION SELECT DISTINCT city FROM points WHERE city != ''")]
+
+    def _word_ok(qw, cw):
+        # слово вопроса против слова названия с обрезкой окончания: «казани» → «казань»
+        for cut in (0, 1, 2, 3):
+            base = qw[:len(qw) - cut]
+            if len(base) < 4:
+                return False
+            if cw.startswith(base):
+                return True
+        return False
+
+    def match_city(phrase):
+        # пословно, чтобы «нижнего новгорода» находил Нижний Новгород, а не Нижнекамск
+        qws = phrase.split()
+        best = None
+        for c in cities:
+            cws = c.lower().replace("ё", "е").split()
+            if len(cws) == len(qws) and all(_word_ok(q, w) for q, w in zip(qws, cws)):
+                if best is None or len(c) < len(best):
+                    best = c  # самое короткое имя = самое точное
+        return best
+
+    # откуда едем: «от Казани», «из Нижнего Новгорода» — для расчёта расстояний
+    origin = None
+    origin_words = set()
+    for om in _re.finditer(r"(?:\bот|\bиз)\s+([а-яе-]{4,})(?:\s+([а-яе-]{4,}))?", low):
+        w1, w2 = om.group(1), om.group(2)
+        got = (match_city(f"{w1} {w2}") if w2 else None)
+        if got:
+            origin_words.update((w1, w2))
+        else:
+            got = match_city(w1)
+            if got:
+                origin_words.add(w1)
+        if got:
+            origin = got
+            break
+
     city = None
     words = _re.findall(r"[а-яе-]{4,}", low)
     stop = {"ярмарк", "ярмарка", "ярмарки", "город", "города", "мероприят", "поехать",
             "можно", "куда", "какие", "есть", "недел", "выходные", "сельхоз", "фестивал"}
-    for w in sorted(words, key=len, reverse=True):
-        if any(w.startswith(s) for s in stop) or month_word(w):
-            continue
-        # пробуем самое длинное совпадение: «казани» → «казан» → Казань, не Казаково
-        for cut in (0, 1, 2, 3):
-            base = w[:len(w) - cut]
-            if len(base) < 4:
-                break
-            hits = [c for c in cities
-                    if c.lower().replace("ё", "е").startswith(base)]
-            if hits:
-                city = min(hits, key=len)  # самое короткое имя = самое точное
-                break
+
+    def usable(w):
+        return w not in origin_words and not any(w.startswith(s) for s in stop) \
+            and not month_word(w)
+
+    # сначала пары слов (составные города), потом одиночные
+    pairs = [f"{words[i]} {words[i + 1]}" for i in range(len(words) - 1)
+             if usable(words[i]) and usable(words[i + 1])]
+    for w in sorted(pairs, key=len, reverse=True):
+        city = match_city(w)
         if city:
             break
+    if not city:
+        for w in sorted(words, key=len, reverse=True):
+            if not usable(w):
+                continue
+            city = match_city(w)
+            if city:
+                break
 
     etypes = None
     tlabel = ""
@@ -1824,9 +1870,11 @@ def _asst_parse(conn, text, today):
         etypes, tlabel = ["День города/села"], "дни городов"
     elif "праздник" in low:
         etypes, tlabel = ["Праздник"], "праздники"
+    elif "маркет" in low:
+        etypes, tlabel = ["Маркет"], "маркеты"
     elif "ярмарк" in low:
         etypes, tlabel = ["Сельхозярмарка", "Ярмарка коммерческая"], "ярмарки"
-    return d1.isoformat(), d2.isoformat(), city, etypes, label, tlabel
+    return d1.isoformat(), d2.isoformat(), city, etypes, label, tlabel, origin
 
 
 def _asst_events(conn, d1, d2, city, etypes, limit=15):
@@ -1854,7 +1902,49 @@ def _asst_events(conn, d1, d2, city, etypes, limit=15):
     return out
 
 
-def _asst_format(events, label, city, tlabel):
+def _asst_geo(conn):
+    return {r["city"].lower().replace("ё", "е"): (r["lat"], r["lon"])
+            for r in conn.execute(
+                "SELECT city, lat, lon FROM geo_cache WHERE lat IS NOT NULL")}
+
+
+def _drive_est(a, b):
+    """Оценка пути на машине: хаверсин × дорожный коэффициент 1.3, средняя 75 км/ч."""
+    import math
+    la1, lo1, la2, lo2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    direct = 2 * 6371 * math.asin(math.sqrt(
+        math.sin((la2 - la1) / 2) ** 2 +
+        math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2))
+    km = direct * 1.3
+    h = km / 75.0
+    if h < 1:
+        ts = f"~{max(5, int(round(h * 60 / 5) * 5))} мин"
+    else:
+        hh, mm = int(h), int(round((h - int(h)) * 60 / 30) * 30)
+        if mm == 60:
+            hh, mm = hh + 1, 0
+        ts = f"~{hh} ч" + (f" {mm} мин" if mm and hh < 10 else "")
+    return int(round(km)), ts
+
+
+def _asst_dists(conn, events, origin):
+    """Каждому событию — «~350 км, ~4 ч 30 мин на машине» от города отправления."""
+    if not origin:
+        return {}
+    geo = _asst_geo(conn)
+    og = geo.get(origin.lower().replace("ё", "е"))
+    if not og:
+        return {}
+    out = {}
+    for e in events:
+        eg = geo.get((e["city"] or "").lower().replace("ё", "е"))
+        if eg:
+            km, ts = _drive_est(og, eg)
+            out[e["id"]] = f"~{km} км, {ts} на машине"
+    return out
+
+
+def _asst_format(events, label, city, tlabel, origin=None, dists=None):
     where = f" (город: {city})" if city else ""
     what = tlabel or "мероприятия"
     if not events:
@@ -1864,14 +1954,18 @@ def _asst_format(events, label, city, tlabel):
     def fd(s):
         return f"{s[8:10]}.{s[5:7]}"
 
+    dists = dists or {}
     lines = []
     for e in events:
         dts = fd(e["date_from"])
         if e["date_to"] and e["date_to"] != e["date_from"]:
             dts += "–" + fd(e["date_to"])
         status = f"занято: {e['busy']}" if e["busy"] else "свободно"
-        lines.append(f"• {dts} · {e['name']} ({e['city']}) — {status}")
+        d = f"\n  🚗 {dists[e['id']]}" if e["id"] in dists else ""
+        lines.append(f"• {dts} · {e['name']} ({e['city']}) — {status}{d}")
     head = f"Вот {what} {label}{where}:"
+    if dists and origin:
+        head = head[:-1] + f", расстояния от города {origin}:"
     tail = "\n\nОткрыть детали и забронировать можно во вкладке «Точки», карта — кнопкой «Карта»."
     return head + "\n" + "\n".join(lines) + tail
 
@@ -1906,16 +2000,21 @@ def assistant_reply(conn, user, messages, today):
         if m.get("role") == "user":
             question = str(m.get("content", ""))
             break
-    d1, d2, city, etypes, label, tlabel = _asst_parse(conn, question, today)
+    d1, d2, city, etypes, label, tlabel, origin = _asst_parse(conn, question, today)
     events = _asst_events(conn, d1, d2, city, etypes)
-    base = _asst_format(events, label, city, tlabel)
+    dists = _asst_dists(conn, events, origin)
+    base = _asst_format(events, label, city, tlabel, origin, dists)
     if _cfg.ANTHROPIC_API_KEY:
         try:
             ctx = "\n".join(
                 f"{e['date_from']}..{e['date_to'] or e['date_from']} | {e['etype']} | "
                 f"{e['name']} | {e['city']} | "
-                f"{'занято: ' + e['busy'] if e['busy'] else 'свободно'}"
+                f"{'занято: ' + e['busy'] if e['busy'] else 'свободно'}" +
+                (f" | от {origin}: {dists[e['id']]}" if e["id"] in dists else "")
                 for e in events) or "(по запросу ничего не найдено)"
+            if origin and dists:
+                ctx = (f"Город отправления: {origin}. Расстояния и время — оценка "
+                       "по автодороге, уже посчитаны в строках.\n" + ctx)
             return _asst_llm(messages, ctx, today)
         except Exception:  # noqa: BLE001 — LLM недоступен, отвечаем данными
             return base

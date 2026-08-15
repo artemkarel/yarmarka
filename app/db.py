@@ -186,6 +186,10 @@ def _migrate(conn):
     ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
     if "last_seen" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+    if "trades" not in ucols:
+        # совладелец/админ «выезжает торговать»: попадает в выдачу-приём товара
+        # и получает переключатель интерфейса продавца в «Ещё»
+        conn.execute("ALTER TABLE users ADD COLUMN trades INTEGER NOT NULL DEFAULT 0")
     if "max_id" not in ucols:
         # один человек — один аккаунт: id в MAX живёт рядом с Telegram-id
         conn.execute("ALTER TABLE users ADD COLUMN max_id INTEGER")
