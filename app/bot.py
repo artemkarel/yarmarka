@@ -87,6 +87,11 @@ async def handle_update(bot, upd):
         )
     elif text.startswith("/id"):
         await bot.send(chat_id, f"Твой Telegram ID: {chat_id}")
+    else:
+        # бот не должен молчать: на любой текст — подсказка и кнопка приложения
+        await bot.send(chat_id, "Я понимаю команды /start и /id, а вся работа — "
+                                "в приложении по кнопке ниже.",
+                       reply_markup=_open_button())
 
 
 async def polling_loop(bot):

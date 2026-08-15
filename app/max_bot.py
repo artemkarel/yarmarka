@@ -120,6 +120,10 @@ async def _handle_update(client, u):
         await _send(client, START_TEXT, chat_id=chat_id)
     elif text.startswith("/id"):
         await _send(client, f"Твой MAX ID: {sender.get('user_id')}", chat_id=chat_id)
+    else:
+        # бот не должен молчать: на любой текст — подсказка и кнопка приложения
+        await _send(client, "Я понимаю команды /start и /id, а вся работа — "
+                            "в приложении по кнопке ниже.", chat_id=chat_id)
 
 
 async def run():
