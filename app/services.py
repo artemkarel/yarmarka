@@ -104,6 +104,39 @@ def users_list(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY role, first_name")]
 
 
+def user_create_manual(conn, first_name, last_name, role, tg_id=None):
+    """Ручное создание пользователя админом/кладовщиком.
+
+    Если Telegram ID известен — человек при первом входе сразу попадёт в свой
+    аккаунт без регистрации. Без ID создаётся внутренний аккаунт (отрицательный
+    tg_id): выдачи и балансы работают, уведомления — нет.
+    """
+    first_name = (first_name or "").strip()
+    last_name = (last_name or "").strip()
+    if not first_name or not last_name:
+        raise ValueError("Укажите имя и фамилию")
+    if role not in ROLES:
+        raise ValueError("Неизвестная роль")
+    if tg_id not in (None, ""):
+        try:
+            tg_id = int(str(tg_id).strip())
+        except ValueError:
+            raise ValueError("Telegram ID — это число (команда /id у бота)")
+        if tg_id <= 0:
+            raise ValueError("Telegram ID должен быть положительным числом")
+    else:
+        tg_id = -int(datetime.now(timezone.utc).timestamp() * 1000)
+    with _lock, conn:
+        if conn.execute("SELECT 1 FROM users WHERE tg_id=?", (tg_id,)).fetchone():
+            raise ValueError("Пользователь с таким Telegram ID уже есть")
+        conn.execute(
+            "INSERT INTO users(tg_id, username, first_name, last_name, role, tz, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (tg_id, None, first_name, last_name, role, None, now_utc()),
+        )
+    return user_by_tg(conn, tg_id)
+
+
 def user_update(conn, uid, role=None, active=None):
     if user_by_id(conn, uid) is None:
         raise ValueError("Пользователь не найден")

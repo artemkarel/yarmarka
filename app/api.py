@@ -643,6 +643,18 @@ def api_users(request: Request):
     return {"users": services.users_list(db.get())}
 
 
+@app.post("/api/users")
+def api_user_create(request: Request, payload: dict = Body(...)):
+    u = current_user(request)
+    need_staff(u)
+    role = payload.get("role") or "seller"
+    if u["role"] in ("keeper", "owner") and role in ("admin", "owner"):
+        raise _err(403, "Только администратор может создавать владельцев")
+    return {"user": services.user_create_manual(
+        db.get(), payload.get("first_name"), payload.get("last_name"), role,
+        payload.get("tg_id"))}
+
+
 @app.put("/api/users/{uid}")
 def api_user_update(uid: int, request: Request, payload: dict = Body(...)):
     u = current_user(request)

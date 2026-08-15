@@ -14,8 +14,8 @@ log = logging.getLogger("bot")
 
 def send_sync(chat_id, text):
     """Уведомление из API-обработчиков: отправляем в фоне, ошибки не роняют запрос."""
-    if not config.BOT_TOKEN or not chat_id:
-        return
+    if not config.BOT_TOKEN or not chat_id or chat_id < 0:
+        return  # отрицательные id — пользователи, заведённые вручную без Telegram
 
     def _go():
         try:
@@ -103,7 +103,7 @@ async def reminders_loop(bot):
         try:
             conn = db.get()
             now = datetime.now(timezone.utc)
-            for u in conn.execute("SELECT * FROM users WHERE active=1"):
+            for u in conn.execute("SELECT * FROM users WHERE active=1 AND tg_id > 0"):
                 u = dict(u)
                 try:
                     tz = ZoneInfo(u["tz"] or config.DEFAULT_TZ)

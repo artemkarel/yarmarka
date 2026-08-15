@@ -613,12 +613,14 @@ async function S_sklad() {
   r.rows.forEach(p => {
     if (p.group_name !== lastGroup) {
       lastGroup = p.group_name;
-      rows += '<div class="hint small" style="margin:10px 4px 2px;font-weight:700">' +
+      rows += '<div class="hint small skgroup" style="margin:10px 4px 2px;font-weight:700">' +
         esc(p.group_name || 'Без группы') + '</div>';
     }
-    rows += '<div class="row"><div class="l"><div class="name">' + esc(p.name) + '</div>' +
-      '<div class="sub">' + fmtQ(p.qty, p.unit) + ' • себестоимость ' + fmtM(p.purchase_value) +
-      '</div></div><div class="r val">' + fmtM(p.retail_value) + '</div></div>';
+    rows += '<div class="row skrow" data-name="' + esc(p.name.toLowerCase()) + '">' +
+      '<div class="l"><div class="name">' + esc(p.name) + '</div>' +
+      '<div class="sub">сумма продажи ' + fmtM(p.retail_value) + ' • себестоимость ' +
+      fmtM(p.purchase_value) + '</div></div>' +
+      '<div class="r val">' + fmtQ(p.qty, p.unit) + '</div></div>';
   });
   const onSellers = await api('/api/analytics/on_sellers');
   const shelfSellers = onSellers.sellers.filter(s => s.shelf.length);
@@ -2115,6 +2117,7 @@ async function S_users() {
   const allRoles = [['seller', 'Продавец'], ['keeper', 'Кладовщик'], ['owner', 'Совладелец'],
     ['admin', 'Админ']];
   const roles = ME.role === 'admin' ? allRoles : allRoles.slice(0, 2);
+  const addBtn = '<button class="btn" id="us-add">+ Добавить пользователя</button>';
   const roleTitle = { seller: 'Продавец', keeper: 'Кладовщик', owner: 'Совладелец',
     admin: 'Админ' };
   const html = '<div class="card">' + r.users.map(u => {
@@ -2129,7 +2132,9 @@ async function S_users() {
     return '<div class="row"><div class="l"><div class="name small">' +
       esc(u.first_name + ' ' + u.last_name) +
       (u.active ? '' : ' <span class="red">(откл.)</span>') +
-      '</div><div class="sub">' + (u.username ? '@' + esc(u.username) : 'id ' + u.tg_id) +
+      '</div><div class="sub">' +
+      (u.username ? '@' + esc(u.username)
+        : (u.tg_id > 0 ? 'id ' + u.tg_id : 'создан вручную, без Telegram')) +
       ' • ' + (roleTitle[u.role] || u.role) +
       '</div></div><div class="r" style="display:flex;gap:6px;align-items:center">' +
       controls + '</div></div>';
@@ -2137,7 +2142,8 @@ async function S_users() {
     '<div class="card hint small">Продавец видит только своё. Кладовщик — склад, выдачи, сдачи, ' +
     'инкассации, продавцов. Совладелец — как админ (прибыль, расходы, наличные), но без ' +
     'управления пользователями и настроек. Админ — всё.</div>';
-  const el = screen('Пользователи', html, true);
+  const el = screen('Пользователи', addBtn + html, true);
+  el.querySelector('#us-add').onclick = () => push(S_userAdd, roles);
   el.addEventListener('change', async e => {
     const sel = e.target.closest('select[data-uid]');
     if (!sel) return;
@@ -2155,6 +2161,35 @@ async function S_users() {
       render();
     } catch (err) { toast(err.message); }
   });
+}
+
+// ручное добавление пользователя
+async function S_userAdd(roles) {
+  const html =
+    '<div class="field"><label>Имя</label><input id="ua-first"></div>' +
+    '<div class="field"><label>Фамилия</label><input id="ua-last"></div>' +
+    '<div class="field"><label>Роль</label><select id="ua-role">' +
+    roles.map(x => '<option value="' + x[0] + '">' + x[1] + '</option>').join('') +
+    '</select></div>' +
+    '<div class="field"><label>Telegram ID (необязательно)</label>' +
+    '<input id="ua-tgid" inputmode="numeric" placeholder="например, 123456789"></div>' +
+    '<div class="card hint small">Если указать Telegram ID (человек может узнать его командой ' +
+    '/id у бота), при первом входе он сразу попадёт в свой аккаунт и будет получать ' +
+    'уведомления. Без ID аккаунт работает только внутри системы.</div>' +
+    '<button class="btn" id="ua-save">Добавить</button>';
+  const el = screen('Новый пользователь', html, true);
+  el.querySelector('#ua-save').onclick = async () => {
+    try {
+      await api('/api/users', 'POST', {
+        first_name: el.querySelector('#ua-first').value,
+        last_name: el.querySelector('#ua-last').value,
+        role: el.querySelector('#ua-role').value,
+        tg_id: el.querySelector('#ua-tgid').value.trim() || null,
+      });
+      toast('Пользователь добавлен ✓', true);
+      back();
+    } catch (e) { toast(e.message); }
+  };
 }
 
 async function S_settings() {
