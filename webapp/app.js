@@ -280,6 +280,13 @@ function screen(title, html, sub) {
       if (dx < 14 || dx <= Math.abs(dy)) return;                              // ещё не ясно
       sw.engaged = true;
       sw.w = sc().clientWidth || innerWidth;
+      // прилипшая панель действий возвращается в поток — едет вместе с экраном
+      const pinned = document.querySelector('body > .stickyact');
+      if (pinned && pinned._anchor && document.body.contains(pinned._anchor)) {
+        pinned._anchor.style.height = '0px';
+        pinned._anchor.after(pinned);
+        pinned.classList.remove('pinned');
+      }
       makeUnder(sw.w);
     }
     if (e.cancelable) e.preventDefault(); // пока тянем — страницу не скроллим
@@ -577,7 +584,7 @@ function docCard(d, showSeller, canManage) {
     statusBadge(d) + '</div>' +
     '<div class="dt">' + dstr(d.date) +
     (tstr(d.ts) ? ' <span style="opacity:.65">' + tstr(d.ts) + '</span>' : '') +
-    controls + ' <span class="dcarr">▾</span></div></div>' +
+    controls + ' <span class="dcarr">›</span></div></div>' +
     '<div class="sub hint small">' + who + sum +
     (d.comment ? ' • ' + esc(d.comment) : '') + '</div></summary>' +
     '<div class="doclines hint small">Загрузка…</div></details>';
@@ -1387,6 +1394,7 @@ async function S_invCount(docId) {
   // поэтому прилипание честное: панель переносится в body как fixed
   const bar = el.querySelector('#ic-actions');
   const anchor = document.createElement('div');
+  bar._anchor = anchor; // для возврата панели в поток при свайпе-назад
   bar.before(anchor);
   const onScroll = () => {
     if (!document.body.contains(anchor)) {
