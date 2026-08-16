@@ -2816,13 +2816,13 @@ function openCityPick(cities, sel, onClose, anchor) {
   pop.className = 'citypop';
   pop.innerHTML =
     '<div class="cphead">Выберите город' +
-    '<span style="display:flex;gap:8px;align-items:center">' +
-    '<button class="chip" id="cp-reset" style="padding:4px 10px"' +
-    (sel.citySel.length ? '' : ' hidden') + '>Сбросить</button>' +
-    '<button class="cpx" id="cp-x">✕</button></span></div>' +
+    '<button class="cpx" id="cp-x">✕</button></div>' +
     '<div class="cpin">' + PIN_SVG +
     '<input id="cp-q" placeholder="Город" autocomplete="off"></div>' +
-    '<div class="cplist" id="cp-list"></div>';
+    '<div class="cplist" id="cp-list"></div>' +
+    '<div class="cpfoot">' +
+    '<button class="btn secondary" id="cp-reset" style="margin:0">Сбросить</button>' +
+    '<button class="btn" id="cp-ok" style="margin:0">Ок</button></div>';
   const inp = pop.querySelector('#cp-q');
   const drawList = () => {
     const q = inp.value.toLowerCase().trim();
@@ -2840,13 +2840,12 @@ function openCityPick(cities, sel, onClose, anchor) {
       (!q && hist.includes(c) ? '🕐 ' : '') + esc(c) + '</span>' +
       (sel.citySel.includes(c) ? '<span class="ck">✓</span>' : '') + '</div>').join('')
       : '<div class="hint small" style="padding:8px 0">Такого города нет</div>';
-    pop.querySelector('#cp-reset').hidden = !sel.citySel.length;
   };
   inp.addEventListener('input', drawList);
   const close = () => { bg.remove(); pop.remove(); onClose(); };
   bg.onclick = close;
   pop.addEventListener('click', e => {
-    if (e.target.closest('#cp-x')) { close(); return; }
+    if (e.target.closest('#cp-x') || e.target.closest('#cp-ok')) { close(); return; }
     if (e.target.closest('#cp-reset')) { sel.citySel.length = 0; drawList(); return; }
     const c = e.target.closest('[data-cp]');
     if (!c) return;
@@ -2869,8 +2868,8 @@ function openCityPick(cities, sel, onClose, anchor) {
   pop.style.width = w + 'px';
   pop.style.top = Math.round(r.bottom + 6) + 'px';
   pop.style.left = Math.round(Math.max(12, Math.min(r.left, window.innerWidth - w - 12))) + 'px';
-  const free = window.innerHeight - r.bottom - 130;
-  pop.querySelector('#cp-list').style.maxHeight = Math.max(170, Math.min(320, free)) + 'px';
+  const free = window.innerHeight - r.bottom - 190;
+  pop.querySelector('#cp-list').style.maxHeight = Math.max(160, Math.min(300, free)) + 'px';
   drawList();
 }
 
