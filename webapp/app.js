@@ -198,7 +198,7 @@ function screen(title, html, sub) {
   const el = old.cloneNode(false);
   old.replaceWith(el);
   // плавающие панели живут в body — чистим при смене экрана
-  document.querySelectorAll('.fab-bar, .chatbar').forEach(n => n.remove());
+  document.querySelectorAll('.fab-bar, .chatbar, .citypop, .cpbg').forEach(n => n.remove());
   const head = sub
     ? '<div class="subhead"><button class="backbtn" onclick="back()">‹</button>' +
       '<div class="subtitle">' + esc(title) + '</div></div>'
@@ -1067,11 +1067,6 @@ async function S_sklad() {
       '</div></details>').join('') + '</div>'
     : '';
   const html =
-    '<div class="tiles">' +
-    '<div class="tile"><div class="tl">Всего кг</div><div class="tv">' + NF3.format(t.kg) + '</div></div>' +
-    '<div class="tile"><div class="tl">Себестоимость</div><div class="tv">' + fmtM(t.purchase_value) + '</div></div>' +
-    '<div class="tile"><div class="tl">Сумма продаж</div><div class="tv">' + fmtM(t.retail_value) + '</div></div>' +
-    '</div>' +
     menuRows([
       ['prihod', 'arrowdown', 'Поступление товара'],
       ['transfer', 'swap', 'Перемещение между сотрудниками'],
@@ -1082,6 +1077,13 @@ async function S_sklad() {
     ]) +
     '<div class="field"><input id="sk-q" placeholder="🔍 Поиск по остаткам…"></div>' +
     '<div class="card"><h3>Остатки на складе</h3>' +
+    '<div class="row"><div class="l hint">Всего кг</div><div class="r val">' +
+    NF3.format(t.kg) + '</div></div>' +
+    '<div class="row"><div class="l hint">Себестоимость</div><div class="r val">' +
+    fmtM(t.purchase_value) + '</div></div>' +
+    '<div class="row"><div class="l hint">Сумма продаж</div><div class="r val">' +
+    fmtM(t.retail_value) + '</div></div>' +
+    '<div style="height:10px"></div>' +
     (rows || '<div class="hint small">Склад пуст. Добавь поступление или начальные остатки.</div>') +
     '</div>' + shelf;
   const el = screen('', html);
@@ -1375,14 +1377,12 @@ async function S_countSheet(kind) {
 // вкладка «Реализация» — меню в стиле склада
 async function S_realiz() {
   const html = '<div id="rz-alert"></div>' + menuRows([
-    ['sellers', 'people', 'По сотрудникам'],
     ['vyd', 'arrowup', 'Выдать товар'],
     ['sd', 'arrowdown', 'Принять товар'],
     ['prices', 'tag', 'Управление ценами'],
   ]);
   const el = screen('', html);
   bindMenu(el, {
-    sellers: () => push(S_sellers),
     vyd: () => push(S_vydachaList),
     sd: () => push(S_sdachaList),
     prices: () => push(S_pricesList),
@@ -2660,8 +2660,8 @@ async function S_map(opts) {
       .concat(allPoints.filter(match)).length,
     onClose: redraw,
   });
-  el.querySelector('#ct-open').onclick = () =>
-    openCityPick(meta.cities || [], sel, redraw);
+  el.querySelector('#ct-open').onclick = e =>
+    openCityPick(meta.cities || [], sel, redraw, e.currentTarget);
   const qInp = el.querySelector('#mp-q');
   qInp.addEventListener('input', () => {
     clearTimeout(qInp._t);
@@ -2753,8 +2753,9 @@ function pillRowHtml(sel, qid, withMap) {
     '<circle cx="14.5" cy="16" r="3.1" fill="currentColor" stroke="none"/></svg>' +
     'Фильтры<span class="pilln" id="fl-n"></span></button>' +
     '<button class="pill' + (sel.citySel.length ? ' on' : '') + '" id="ct-open">' +
-    '<span id="ct-label">' + esc(ctText(sel)) + '</span><span class="pv">⌄</span></button>' +
-    (withMap ? '<button class="pill mappill" id="map-open">🗺 Карта</button>' : '') +
+    PIN_SVG + '<span id="ct-label">' + esc(ctText(sel)) + '</span>' +
+    '<span class="pv">⌄</span></button>' +
+    (withMap ? '<button class="pill mappill" id="map-open" title="Карта">🗺</button>' : '') +
     '</div>';
 }
 
@@ -2769,6 +2770,14 @@ function bindSearchPill(el, qid) {
   const inp = el.querySelector('#' + qid);
   const x = el.querySelector('#' + qid + '-x');
   const row = inp.closest('.pillrow');
+  // в покое поле схлопнуто до лупы — тап по квадратику раскрывает и фокусирует
+  inp.closest('.searchpill').addEventListener('click', () => {
+    if (!row.classList.contains('searching')) {
+      row.classList.add('searching');
+      x.hidden = false;
+      inp.focus();
+    }
+  });
   inp.addEventListener('focus', () => { row.classList.add('searching'); x.hidden = false; });
   inp.addEventListener('blur', () => {
     if (!inp.value.trim()) {
@@ -2786,67 +2795,52 @@ function bindSearchPill(el, qid) {
   });
 }
 
-// выбор городов: история последних, вводишь — сразу подсказки, выбор нескольких
-function openCityPick(cities, sel, onClose) {
+const PIN_SVG =
+  '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" stroke="none"' +
+  ' style="flex:none"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0' +
+  ' 0-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>';
+
+// выбор городов: маленькое окошко у самой кнопки, список как в афише, мультивыбор
+function openCityPick(cities, sel, onClose, anchor) {
+  document.querySelectorAll('.citypop, .cpbg').forEach(n => n.remove());
   const bg = document.createElement('div');
-  bg.className = 'sheetbg';
-  const sh = document.createElement('div');
-  sh.className = 'sheet';
-  sh.innerHTML =
-    '<div class="sheethandle"></div>' +
-    '<h3 style="margin-bottom:10px">Города</h3>' +
-    '<div class="field" style="margin-bottom:6px">' +
-    '<input id="cp-q" placeholder="Начни вводить город…" autocomplete="off"></div>' +
-    '<div id="cp-sel"></div><div id="cp-sug"></div>' +
-    '<div class="sheetfoot">' +
-    '<button class="btn secondary" id="cp-reset" style="margin:0">Сбросить</button>' +
-    '<button class="btn" id="cp-done" style="margin:0">Готово</button></div>';
-  const inp = sh.querySelector('#cp-q');
-  const drawLists = () => {
+  bg.className = 'cpbg';
+  const pop = document.createElement('div');
+  pop.className = 'citypop';
+  pop.innerHTML =
+    '<div class="cphead">Выберите город' +
+    '<span style="display:flex;gap:8px;align-items:center">' +
+    '<button class="chip" id="cp-reset" style="padding:4px 10px"' +
+    (sel.citySel.length ? '' : ' hidden') + '>Сбросить</button>' +
+    '<button class="cpx" id="cp-x">✕</button></span></div>' +
+    '<div class="cpin">' + PIN_SVG +
+    '<input id="cp-q" placeholder="Город" autocomplete="off"></div>' +
+    '<div class="cplist" id="cp-list"></div>';
+  const inp = pop.querySelector('#cp-q');
+  const drawList = () => {
     const q = inp.value.toLowerCase().trim();
-    sh.querySelector('#cp-sel').innerHTML = sel.citySel.length
-      ? '<div class="shsec">Выбраны</div><div class="chipwrap">' +
-        sel.citySel.map(c =>
-          '<button class="chip on" data-cp="' + esc(c) + '">' + esc(c) + ' ✕</button>')
-          .join('') + '</div>'
-      : '';
+    const hist = cityHist().filter(c => cities.includes(c) && !sel.citySel.includes(c));
+    let items;
     if (q) {
-      const sug = cities.filter(c => !sel.citySel.includes(c) &&
-        fuzzyMatch(q, c.toLowerCase())).slice(0, 24);
-      sh.querySelector('#cp-sug').innerHTML = sug.length
-        ? '<div class="chipwrap" style="margin-top:8px">' +
-          sug.map(c => '<button class="chip" data-cp="' + esc(c) + '">' + esc(c) +
-            '</button>').join('') + '</div>'
-        : '<div class="hint small" style="margin:8px 4px">Такого города нет</div>';
-      return;
+      items = cities.filter(c => fuzzyMatch(q, c.toLowerCase())).slice(0, 60);
+    } else {
+      // выбранные, затем недавние, затем все по алфавиту
+      const rest = cities.filter(c => !sel.citySel.includes(c) && !hist.includes(c));
+      items = [...sel.citySel, ...hist, ...rest];
     }
-    // без запроса — недавние города с возможностью очистить историю
-    const hist = cityHist().filter(c => !sel.citySel.includes(c) && cities.includes(c));
-    sh.querySelector('#cp-sug').innerHTML = hist.length
-      ? '<div class="shsec" style="display:flex;justify-content:space-between;' +
-        'align-items:center">Недавние' +
-        '<button class="chip" id="cp-clear" style="padding:4px 10px">Очистить</button></div>' +
-        '<div class="chipwrap">' +
-        hist.map(c => '<button class="chip" data-cp="' + esc(c) + '">🕐 ' + esc(c) +
-          '</button>').join('') + '</div>'
-      : (sel.citySel.length ? ''
-        : '<div class="hint small" style="margin:8px 4px">Начни вводить название — ' +
-          'города появятся снизу</div>');
+    pop.querySelector('#cp-list').innerHTML = items.length ? items.map(c =>
+      '<div class="cprow" data-cp="' + esc(c) + '"><span>' +
+      (!q && hist.includes(c) ? '🕐 ' : '') + esc(c) + '</span>' +
+      (sel.citySel.includes(c) ? '<span class="ck">✓</span>' : '') + '</div>').join('')
+      : '<div class="hint small" style="padding:8px 0">Такого города нет</div>';
+    pop.querySelector('#cp-reset').hidden = !sel.citySel.length;
   };
-  inp.addEventListener('input', drawLists);
-  const close = () => {
-    document.body.classList.remove('sheet-open');
-    bg.remove(); sh.remove(); onClose();
-  };
+  inp.addEventListener('input', drawList);
+  const close = () => { bg.remove(); pop.remove(); onClose(); };
   bg.onclick = close;
-  sh.addEventListener('click', e => {
-    if (e.target.id === 'cp-done') { close(); return; }
-    if (e.target.id === 'cp-reset') { sel.citySel.length = 0; drawLists(); return; }
-    if (e.target.id === 'cp-clear') {
-      localStorage.removeItem('cityHist');
-      drawLists();
-      return;
-    }
+  pop.addEventListener('click', e => {
+    if (e.target.closest('#cp-x')) { close(); return; }
+    if (e.target.closest('#cp-reset')) { sel.citySel.length = 0; drawList(); return; }
     const c = e.target.closest('[data-cp]');
     if (!c) return;
     const val = c.dataset.cp;
@@ -2858,15 +2852,19 @@ function openCityPick(cities, sel, onClose) {
       const h = [val, ...cityHist().filter(x => x !== val)].slice(0, 10);
       localStorage.setItem('cityHist', JSON.stringify(h));
     }
-    inp.value = '';
-    drawLists();
+    drawList();
   });
-  bg.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
-  document.body.classList.add('sheet-open');
   document.body.appendChild(bg);
-  document.body.appendChild(sh);
-  drawLists();
-  // поле НЕ фокусируем: авто-фокус открывал клавиатуру и дёргал страницу вниз
+  document.body.appendChild(pop);
+  // окошко появляется там же, где кнопка, и не вылезает за края экрана
+  const r = anchor.getBoundingClientRect();
+  const w = Math.min(320, window.innerWidth - 24);
+  pop.style.width = w + 'px';
+  pop.style.top = Math.round(r.bottom + 6) + 'px';
+  pop.style.left = Math.round(Math.max(12, Math.min(r.left, window.innerWidth - w - 12))) + 'px';
+  const free = window.innerHeight - r.bottom - 130;
+  pop.querySelector('#cp-list').style.maxHeight = Math.max(170, Math.min(320, free)) + 'px';
+  drawList();
 }
 
 function openFilterSheet(opts) {
@@ -3028,8 +3026,8 @@ async function S_places() {
     count: () => evsF().filter(ev => evIntersects(ev, per)).length + ptsF().length,
     onClose: applyAll,
   });
-  el.querySelector('#ct-open').onclick = () =>
-    openCityPick(meta.cities || [], sel, applyAll);
+  el.querySelector('#ct-open').onclick = e =>
+    openCityPick(meta.cities || [], sel, applyAll, e.currentTarget);
   el.querySelector('#map-open').onclick = () =>
     push(S_map, { events: allEvents, points: allPoints, meta: meta });
   el.querySelector('#ai-open').onclick = () => push(S_aiChat);
