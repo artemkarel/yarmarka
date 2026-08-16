@@ -2363,7 +2363,7 @@ function whoMatch(x, whoSel) {
 }
 
 // выбор месяца и года для шкалы дат: тап по месяцу сразу переносит календарь
-function openMonthSheet(selKey, onPick) {
+function openMonthSheet(selKey, onPick, yearAll) {
   const cur = new Date((selKey || today()) + 'T00:00:00');
   let year = cur.getFullYear();
   const nowY = new Date().getFullYear();
@@ -2384,11 +2384,13 @@ function openMonthSheet(selKey, onPick) {
       '<div class="chipwrap">' + years.map(y =>
         '<button class="chip' + (y === year ? ' on' : '') + '" data-yr="' + y + '">' + y +
         '</button>').join('') + '</div>' +
-      '<button class="btn secondary" id="ms-all" style="margin:12px 0 0">' +
-      'Показать весь ' + year + ' год</button>' +
+      '<button class="btn secondary" id="ms-all" style="margin:12px 0 0' +
+      (yearAll === year ? ';color:var(--accent)' : '') + '">' +
+      (yearAll === year ? '✓ Весь ' + year + ' год (нажми, чтобы снять)'
+        : 'Показать весь ' + year + ' год') + '</button>' +
       '<div class="shsec">Месяц</div><div class="chipwrap">' + RU_M_FULL.map((m, i) =>
         '<button class="chip' +
-        (year === cur.getFullYear() && i === cur.getMonth() ? ' on' : '') +
+        (year === cur.getFullYear() && i === cur.getMonth() && !yearAll ? ' on' : '') +
         '" data-mi="' + i + '">' + m + '</button>').join('') + '</div>';
   };
   bg.onclick = close;
@@ -2396,18 +2398,23 @@ function openMonthSheet(selKey, onPick) {
     const y = e.target.closest('[data-yr]');
     if (y) { year = +y.dataset.yr; draw(); return; }
     if (e.target.id === 'ms-all') {
-      // весь год разом — без выбора месяца и дня
       close();
-      onPick(null, year);
+      // повторный тап по активному «весь год» снимает выбор — назад к сегодня
+      if (yearAll === year) onPick(today());
+      else onPick(null, year);
       return;
     }
     const m = e.target.closest('[data-mi]');
     if (!m) return;
+    close();
+    if (m.classList.contains('on')) {
+      onPick(today()); // повторный тап по выбранному месяцу — снимаем выбор
+      return;
+    }
     const t = new Date();
     // текущий месяц — сразу на сегодня, иначе на 1-е число
     const key = (year === t.getFullYear() && +m.dataset.mi === t.getMonth())
       ? today() : isoDate(new Date(year, +m.dataset.mi, 1));
-    close();
     onPick(key);
   });
   bg.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
@@ -2714,7 +2721,7 @@ async function S_map(opts) {
       PL_STATE.selKey = key;
     }
     render(); // шкала пересобирается вокруг выбранного
-  });
+  }, PL_STATE.yearAll);
   const selItem = stripEl.querySelector('.ditem.sel');
   if (selItem) {
     stripEl.style.scrollBehavior = 'auto';
@@ -3140,7 +3147,7 @@ async function S_places() {
       PL_STATE.selKey = key;
     }
     render(); // шкала пересобирается вокруг выбранного
-  });
+  }, PL_STATE.yearAll);
   stripEl.addEventListener('scroll', () => {
     clearTimeout(stripEl._t);
     stripEl._t = setTimeout(updMonth, 80);
