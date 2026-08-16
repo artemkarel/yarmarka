@@ -4040,19 +4040,21 @@ async function S_users() {
           : '') +
         '<button class="chip" data-ren="' + u.id + '" title="Переименовать">✏️</button>' +
         '<button class="chip" data-tgl="' + u.id + '">' + (u.active ? '⏸' : '▶️') + '</button>';
-    return '<div class="row"><div class="l"><div class="name small">' +
-      esc(u.first_name + ' ' + u.last_name) +
-      (u.active ? '' : ' <span class="red">(откл.)</span>') +
-      '</div><div class="sub">' +
+    // в строке только имя и фамилия; остальное — за значком раскрытия
+    return '<details class="urow"><summary>' +
+      '<div class="row" style="border:none;padding:9px 0">' +
+      '<div class="l name">' + esc(u.first_name + ' ' + u.last_name) +
+      (u.active ? '' : ' <span class="red">(откл.)</span>') + '</div>' +
+      '<div class="r"><span class="dcarr">›</span></div></div></summary>' +
+      '<div class="sub hint small" style="margin:0 0 8px">' +
       (u.username ? '@' + esc(u.username)
         : (u.tg_id > 0 ? 'id ' + u.tg_id : 'создан вручную, без мессенджера')) +
       (u.platform && u.platform !== 'TG' ? ' • ' + u.platform : '') +
       ' • ' + (roleTitle[u.role] || u.role) +
       (seenStr(u.last_seen)
         ? '<br>заходил(а): ' + seenStr(u.last_seen)
-        : '<br><span style="opacity:.7">ещё не заходил(а)</span>') +
-      '</div></div><div class="r" style="display:flex;gap:6px;align-items:center">' +
-      controls + '</div></div>';
+        : '<br><span style="opacity:.7">ещё не заходил(а)</span>') + '</div>' +
+      '<div class="uctl">' + controls + '</div></details>';
   }).join('') + '</div>' +
     '';
   const el = screen('Пользователи', addBtn + html, true);

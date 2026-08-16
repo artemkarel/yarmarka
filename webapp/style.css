@@ -209,6 +209,12 @@ details.doc .doclines{ padding:0 14px 12px; }
 .infoico{ color:var(--accent); margin-left:6px; font-size:14px; opacity:.85; }
 .tipico{ border:none; background:transparent; color:var(--accent); font-size:16px;
   margin-left:7px; cursor:pointer; padding:0; vertical-align:2px; }
+/* пользователи: строка с ФИО, детали и управление — в раскрытии */
+details.urow{ border-bottom:1px solid rgba(128,128,128,.12); }
+details.urow:last-child{ border-bottom:none; }
+details.urow > summary{ list-style:none; cursor:pointer; }
+details.urow > summary::-webkit-details-marker{ display:none; }
+.uctl{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:0 0 10px; }
 .dcarr{ display:inline-block; color:var(--text); opacity:.75; font-size:21px;
   font-weight:800; line-height:1; padding:7px 12px; margin:-7px -8px -7px 2px;
   transition:transform .2s ease; }
