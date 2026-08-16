@@ -571,12 +571,13 @@ function docCard(d, showSeller, canManage) {
     }
   }
   return '<details class="doc' + (d.status === 'void' ? ' voided' : '') +
+    '" data-did="' + d.id + '" data-dstatus="' + d.status +
     '" ontoggle="onDocToggle(event,' + d.id + ')">' +
     '<summary><div class="dochead"><div><b>' + meta[0] + ' ' + meta[1] + '</b>' +
     statusBadge(d) + '</div>' +
     '<div class="dt">' + dstr(d.date) +
     (tstr(d.ts) ? ' <span style="opacity:.65">' + tstr(d.ts) + '</span>' : '') +
-    controls + '</div></div>' +
+    controls + ' <span class="dcarr">▾</span></div></div>' +
     '<div class="sub hint small">' + who + sum +
     (d.comment ? ' • ' + esc(d.comment) : '') + '</div></summary>' +
     '<div class="doclines hint small">Загрузка…</div></details>';
@@ -763,6 +764,34 @@ function attachProductSearch(el, products, opts) {
 }
 
 // строки «сначала добавь строку — потом ищи позицию в ней»
+// подсказка раздела: текст спрятан за значком ⓘ рядом с заголовком
+function infoTip(el, text) {
+  const t = el.querySelector('.subtitle') || el.querySelector('.pagetitle');
+  if (!t) return;
+  t.insertAdjacentHTML('beforeend', '<button class="tipico" aria-label="Подсказка">ⓘ</button>');
+  t.querySelector('.tipico').onclick = e => {
+    e.stopPropagation();
+    const bg = document.createElement('div');
+    bg.className = 'sheetbg';
+    const sh = document.createElement('div');
+    sh.className = 'sheet';
+    sh.innerHTML =
+      '<div class="sheethandle"></div><h3 style="margin-bottom:8px">Подсказка</h3>' +
+      '<div style="font-size:14.5px;line-height:1.55">' + text + '</div>' +
+      '<button class="btn" id="tip-ok" style="margin:14px 0 0">Понятно</button>';
+    const close = () => {
+      document.body.classList.remove('sheet-open');
+      bg.remove(); sh.remove();
+    };
+    bg.onclick = close;
+    sh.querySelector('#tip-ok').onclick = close;
+    bg.addEventListener('touchmove', ev => ev.preventDefault(), { passive: false });
+    document.body.classList.add('sheet-open');
+    document.body.appendChild(bg);
+    document.body.appendChild(sh);
+  };
+}
+
 // ведомость по группам — как в номенклатуре: тап по названию сворачивает группу
 function groupedSheet(products, rowFn) {
   const groups = [];
@@ -966,8 +995,6 @@ async function S_orderNew() {
   const r = await api('/api/stock');
   const rows = r.rows.filter(x => x.qty > 0.0005);
   const html =
-    '<div class="card hint small">Укажи, сколько подготовить к выдаче. Кладовщик получит ' +
-    'уведомление и соберёт заказ.</div>' +
     '<div class="field"><input id="or-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card" id="or-list">' + (rows.length ? rows.map((x, i) =>
       '<div class="row prow" data-name="' + esc(x.name.toLowerCase()) + '">' +
@@ -982,6 +1009,8 @@ async function S_orderNew() {
     '<input id="or-comment" placeholder="Например: к пятнице, на ярмарку в Казань"></div>' +
     '<button class="btn" id="or-send">Отправить заявку</button>';
   const el = screen('Заявка на товар', html, true);
+  infoTip(el, 'Укажи, сколько подготовить к выдаче. Кладовщик получит уведомление ' +
+    'в мессенджер и соберёт заказ.');
   floatSave(el, '#or-send');
   el.querySelector('#or-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
@@ -1160,8 +1189,7 @@ async function S_chooseSeller(mode) {
   const sellers = forSdacha ? r.sellers.filter(s => s.hands_value > 0.005) : r.sellers;
   const hint = forSdacha ? 'От кого принимаем товар?' : 'Кому выдаём товар под реализацию?';
   const html = sellers.length
-    ? '<div class="card hint small">' + hint + '</div>' +
-      sellers.map(s =>
+    ? sellers.map(s =>
         '<div class="card" data-pick="' + s.id + '" style="cursor:pointer">' +
         '<div class="row" style="border:none;padding:2px 0"><div class="l">' +
         '<div class="name">' + esc(s.name) + '</div>' +
@@ -1171,6 +1199,7 @@ async function S_chooseSeller(mode) {
         ? 'Ни у кого нет товара на руках — принимать нечего.'
         : 'Продавцов пока нет — они появятся после регистрации в боте.') + '</div>';
   const el = screen(forSdacha ? 'Приём товара' : 'Кому выдать', html, true);
+  infoTip(el, hint);
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-pick]');
     if (!c) return;
@@ -1320,6 +1349,16 @@ async function S_invStart() {
       push(S_invCount, created.doc.id);
     } catch (e) { toast(e.message); }
   };
+  // тап по карточке проваливается в ведомость (черновик) или отчёт;
+  // раскрытие состава — стрелочкой сбоку
+  el.addEventListener('click', e => {
+    const sum = e.target.closest('details.doc > summary');
+    if (!sum || e.target.closest('.dcarr')) return;
+    const det = sum.parentElement;
+    e.preventDefault();
+    if (det.dataset.dstatus === 'draft') push(S_invCount, +det.dataset.did);
+    else push(S_invReport, +det.dataset.did);
+  });
 }
 
 async function S_invCount(docId) {
@@ -1336,13 +1375,13 @@ async function S_invCount(docId) {
     p.id + '" value="' + (facts[p.id] != null ? facts[p.id] : '') +
     '" placeholder="факт"></div></div>');
   const html =
-    '<div class="card hint small">Ведомость №' + docId + ' (черновик). Считай в несколько ' +
-    'заходов: вноси факты и жми «Сохранить подсчёт». Остатки не меняются до проведения. ' +
-    'Пустые поля при проведении не трогаются.</div>' +
     '<div class="field"><input id="ic-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card" id="ic-list">' + rows + '</div>' +
     '';
   const el = screen('Инвентаризация', html, true);
+  infoTip(el, 'Ведомость №' + docId + ' (черновик). Считай в несколько заходов: вноси ' +
+    'факты и жми «Сохранить». Остатки не меняются до проведения. Пустые поля при ' +
+    'проведении не трогаются.');
   // кнопки живут в шапке; шапка липкая — видна в любом месте списка
   const shead = el.querySelector('.subhead');
   shead.classList.add('sticky');
@@ -1661,13 +1700,12 @@ async function S_sdacha(sid) {
     '<input inputmode="decimal" class="s-sold" data-i="' + i + '" value="' + h.qty + '"></div>' +
     '</div></div>').join('');
   const html =
-    '<div class="card hint small">Впиши, сколько вернулось на склад и на полку — «продано» ' +
-    'посчитается само. Если что-то остаётся у продавца на руках, уменьши «продано».</div>' +
     '<div class="field"><label>Дата</label><input type="date" id="s-date" value="' + today() + '"></div>' +
     rows +
     '<div class="card" id="s-total"></div>' +
     '<button class="btn" id="s-save">Принять сдачу</button>';
   const el = screen('Сдача: ' + info.seller.name, html, true);
+  infoTip(el, 'Впиши, сколько вернулось на склад и на полку — «продано» посчитается само. Если что-то остаётся у продавца на руках, уменьши «продано».');
   floatSave(el, '#s-save');
   const touched = {};
 
@@ -1737,8 +1775,7 @@ async function S_transferPick() {
   const r = await api('/api/sellers');
   const withGoods = r.sellers.filter(s => s.hands_value > 0.005);
   const html = withGoods.length
-    ? '<div class="card hint small">Кто передаёт товар?</div>' +
-      withGoods.map(s =>
+    ? withGoods.map(s =>
         '<div class="card" data-pick="' + s.id + '" style="cursor:pointer">' +
         '<div class="row" style="border:none;padding:2px 0"><div class="l">' +
         '<div class="name">' + esc(s.name) + '</div>' +
@@ -1746,6 +1783,7 @@ async function S_transferPick() {
         '<div class="r hint">›</div></div></div>').join('')
     : '<div class="card hint">Ни у кого нет товара на руках — перемещать нечего.</div>';
   const el = screen('Перемещение товара', html, true);
+  infoTip(el, 'Выбери, кто передаёт товар. Товар и долг за него переедут к получателю.');
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-pick]');
     if (!c) return;
@@ -1778,14 +1816,13 @@ async function S_transfer(fromSid) {
     '<div class="r" style="width:104px"><input inputmode="decimal" class="tr-q" data-pid="' +
     h.product_id + '" data-max="' + h.qty + '" placeholder="сколько"></div></div>').join('');
   const html =
-    '<div class="card hint small">Товар и долг за него переедут к получателю. ' +
-    'Оба получат уведомление в Telegram.</div>' +
     '<div class="field"><label>Кому передать</label><select id="tr-to">' +
     others.map(s => '<option value="' + s.id + '">' + esc(s.name) + '</option>').join('') +
     '</select></div>' +
     '<div class="card">' + rows + '</div>' +
     '<button class="btn" id="tr-save">Передать</button>';
   const el = screen('Передача: ' + info.seller.name, html, true);
+  infoTip(el, 'Товар и долг за него переедут к получателю. Оба получат уведомление в мессенджер.');
   floatSave(el, '#tr-save');
   el.querySelector('#tr-save').onclick = async () => {
     const lines = [];
@@ -2099,10 +2136,10 @@ async function S_repMovement() {
       '</div><div class="sub hint">склад</div></div></div>';
   }).join('');
   const html = chips.html +
-    '<div class="card hint small">Справа — изменение складского остатка за период.</div>' +
     '<div class="card">' + (rows || '<div class="hint small">Движения за период нет</div>') +
     '</div>';
   const el = screen('Отчёт по движению', html, true);
+  infoTip(el, 'Справа — изменение складского остатка за период.');
   chips.bind(el);
 }
 
@@ -3537,11 +3574,10 @@ async function S_prices() {
     '<div class="seg" id="pz-mode" style="margin-bottom:10px">' +
     '<button' + (retail ? ' class="on"' : '') + '>Цены продажи</button>' +
     '<button' + (retail ? '' : ' class="on"') + '>Себестоимость</button></div>' +
-    '<div class="card hint small">Меняй цену прямо в окошке — рядом появится кнопка ✓ ' +
-    'для сохранения.</div>' +
     '<div class="field"><input id="pz-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>';
   const el = screen('Изменение цен', html, true);
+  infoTip(el, 'Выбери, какие цены редактируешь, и меняй прямо в окошке — рядом появится кнопка ✓ для сохранения.');
   el.querySelectorAll('#pz-mode button').forEach((b, i) => {
     b.onclick = () => {
       PRICES_MODE = i === 0 ? 'retail' : 'cost';
@@ -3650,13 +3686,12 @@ async function S_groupOrder() {
         '<button class="chip" data-ren="' + i + '">✏️</button>' +
         '<button class="chip" data-del="' + i + '">🗑</button></div></div>').join('');
   const html =
-    '<div class="card hint small">Стрелками задай порядок — он применится во всех списках ' +
-    'товаров. ✏️ — переименовать, 🗑 — удалить (товары останутся без папки).</div>' +
     '<div class="card" id="go-list">' + rowsHtml() + '</div>' +
     '<div class="card"><div class="field" style="margin-bottom:8px">' +
     '<label>Новая папка</label><input id="go-new" placeholder="Например, Пастила"></div>' +
     '<button class="btn secondary" id="go-add" style="margin:0">+ Создать папку</button></div>';
   const el = screen('Папки товаров', html, true);
+  infoTip(el, 'Стрелками задай порядок — он применится во всех списках товаров. ✏️ — переименовать, 🗑 — удалить (товары останутся без папки).');
   const redraw = () => { el.querySelector('#go-list').innerHTML = rowsHtml(); };
   const reload = rr => { groups = rr.groups.map(g => g.name); renaming = -1; redraw(); };
   el.querySelector('#go-add').onclick = async () => {
@@ -3979,6 +4014,7 @@ async function S_users() {
           ? '<button class="chip' + (u.trades ? ' on' : '') + '" data-trd="' + u.id +
             '" title="Выезжает торговать">🛒</button>'
           : '') +
+        '<button class="chip" data-ren="' + u.id + '" title="Переименовать">✏️</button>' +
         '<button class="chip" data-tgl="' + u.id + '">' + (u.active ? '⏸' : '▶️') + '</button>';
     return '<div class="row"><div class="l"><div class="name small">' +
       esc(u.first_name + ' ' + u.last_name) +
@@ -3994,10 +4030,9 @@ async function S_users() {
       '</div></div><div class="r" style="display:flex;gap:6px;align-items:center">' +
       controls + '</div></div>';
   }).join('') + '</div>' +
-    '<div class="card hint small">Продавец видит только своё. Кладовщик — склад, выдачи, сдачи, ' +
-    'инкассации, продавцов. Совладелец — как админ (прибыль, расходы, наличные), но без ' +
-    'управления пользователями и настроек. Админ — всё.</div>';
+    '';
   const el = screen('Пользователи', addBtn + html, true);
+  infoTip(el, 'Продавец видит только своё. Кладовщик — склад, выдачи, сдачи, инкассации, продавцов. Совладелец — как админ (прибыль, расходы, наличные), но без управления пользователями и настроек. Админ — всё. 🛒 — выезжает торговать.');
   el.querySelector('#us-add').onclick = () => push(S_userAdd, roles);
   el.addEventListener('change', async e => {
     const sel = e.target.closest('select[data-uid]');
@@ -4008,6 +4043,11 @@ async function S_users() {
     } catch (err) { toast(err.message); render(); }
   });
   el.addEventListener('click', async e => {
+    const rn = e.target.closest('[data-ren]');
+    if (rn) {
+      openUserNameSheet(r.users.find(x => x.id === +rn.dataset.ren));
+      return;
+    }
     const t = e.target.closest('[data-trd]');
     if (t) {
       const u = r.users.find(x => x.id === +t.dataset.trd);
@@ -4029,6 +4069,41 @@ async function S_users() {
   });
 }
 
+// редактирование имени и фамилии пользователя — маленьким листом
+function openUserNameSheet(u) {
+  const bg = document.createElement('div');
+  bg.className = 'sheetbg';
+  const sh = document.createElement('div');
+  sh.className = 'sheet';
+  sh.innerHTML =
+    '<div class="sheethandle"></div><h3 style="margin-bottom:10px">Имя и фамилия</h3>' +
+    '<div class="field"><label>Имя</label><input id="un-first" value="' +
+    esc(u.first_name) + '"></div>' +
+    '<div class="field"><label>Фамилия</label><input id="un-last" value="' +
+    esc(u.last_name) + '"></div>' +
+    '<button class="btn" id="un-save" style="margin:6px 0 0">Сохранить</button>';
+  const close = () => {
+    document.body.classList.remove('sheet-open');
+    bg.remove(); sh.remove();
+  };
+  bg.onclick = close;
+  sh.querySelector('#un-save').onclick = async () => {
+    try {
+      const rr = await api('/api/users/' + u.id, 'PUT', {
+        first_name: sh.querySelector('#un-first').value,
+        last_name: sh.querySelector('#un-last').value,
+      });
+      if (u.id === ME.id) ME = rr.user;
+      toast('Имя обновлено ✓', true);
+      close();
+      render();
+    } catch (e) { toast(e.message); }
+  };
+  document.body.classList.add('sheet-open');
+  document.body.appendChild(bg);
+  document.body.appendChild(sh);
+}
+
 // ручное добавление пользователя
 async function S_userAdd(roles) {
   const html =
@@ -4041,11 +4116,9 @@ async function S_userAdd(roles) {
     '<input id="ua-nick" placeholder="@username"></div>' +
     '<div class="field"><label>Telegram ID (необязательно)</label>' +
     '<input id="ua-tgid" inputmode="numeric" placeholder="например, 123456789"></div>' +
-    '<div class="card hint small">Укажи ник или Telegram ID — тогда человек при первом входе ' +
-    'сразу попадёт в свой аккаунт и будет получать уведомления. ID можно узнать командой ' +
-    '/id у бота. Без ника и ID аккаунт работает только внутри системы.</div>' +
     '<button class="btn" id="ua-save">Добавить</button>';
   const el = screen('Новый пользователь', html, true);
+  infoTip(el, 'Укажи ник или Telegram ID — тогда человек при первом входе сразу попадёт в свой аккаунт и будет получать уведомления. ID можно узнать командой /id у бота. Без ника и ID аккаунт работает только внутри системы.');
   el.querySelector('#ua-save').onclick = async () => {
     try {
       await api('/api/users', 'POST', {
@@ -4069,9 +4142,9 @@ async function S_settings() {
     '<div class="field"><label>Комиссия терминала, %</label>' +
     '<input id="st-comm" inputmode="decimal" value="' + r.settings.commission_pct + '"></div>' +
     '<button class="btn" id="st-save">Сохранить</button>' +
-    '<div class="card hint small">Изменения действуют на новые документы. ' +
-    'Уже проведённые выдачи, сдачи и инкассации не пересчитываются.</div>';
+    '';
   const el = screen('Настройки', html, true);
+  infoTip(el, 'Изменения действуют на новые документы. Уже проведённые выдачи, сдачи и инкассации не пересчитываются.');
   el.querySelector('#st-save').onclick = async () => {
     try {
       const rr = await api('/api/settings', 'PUT', {

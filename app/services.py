@@ -229,7 +229,8 @@ def user_create_manual(conn, first_name, last_name, role, tg_id=None, username=N
     return user_by_tg(conn, tg_id)
 
 
-def user_update(conn, uid, role=None, active=None, trades=None):
+def user_update(conn, uid, role=None, active=None, trades=None,
+                first_name=None, last_name=None):
     if user_by_id(conn, uid) is None:
         raise ValueError("Пользователь не найден")
     with _lock, conn:
@@ -241,6 +242,15 @@ def user_update(conn, uid, role=None, active=None, trades=None):
             conn.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, uid))
         if trades is not None:
             conn.execute("UPDATE users SET trades=? WHERE id=?", (1 if trades else 0, uid))
+        if first_name is not None or last_name is not None:
+            fn = (first_name or "").strip()
+            ln = (last_name or "").strip()
+            if not fn or not ln:
+                raise ValueError("Имя и фамилия не могут быть пустыми")
+            if len(fn) > 50 or len(ln) > 50:
+                raise ValueError("Слишком длинное имя")
+            conn.execute("UPDATE users SET first_name=?, last_name=? WHERE id=?",
+                         (fn, ln, uid))
     return user_by_id(conn, uid)
 
 

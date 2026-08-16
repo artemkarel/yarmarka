@@ -941,7 +941,9 @@ def api_user_update(uid: int, request: Request, payload: dict = Body(...)):
         raise _err(400, "Нельзя понизить или отключить самого себя")
     return {"user": services.user_update(db.get(), uid, role=payload.get("role"),
                                          active=payload.get("active"),
-                                         trades=payload.get("trades"))}
+                                         trades=payload.get("trades"),
+                                         first_name=payload.get("first_name"),
+                                         last_name=payload.get("last_name"))}
 
 
 @app.get("/api/settings")
