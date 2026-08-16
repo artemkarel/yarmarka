@@ -580,17 +580,39 @@ function docCard(d, showSeller, canManage) {
     '<div class="doclines hint small">Загрузка…</div></details>';
 }
 
-// история документов раздела: свежие сверху (по времени создания)
-function histBlock(el, type) {
-  const box = el.querySelector('#hist');
-  if (!box) return;
-  api('/api/docs?type=' + type + '&limit=30').then(r => {
-    if (!r.docs.length) return;
-    box.innerHTML =
-      '<div class="shsec" style="margin:18px 4px 8px">📚 История</div>' +
-      r.docs.map(d => docCard(d, true, false)).join('');
-  }).catch(() => { /* история не критична */ });
+// вход в раздел документов: сверху «+ Создать», ниже список ранее созданных
+function docListScreen(title, dtype, btnLabel, onCreate, emptyHint) {
+  return async function () {
+    const r = await api('/api/docs?type=' + dtype + '&limit=30');
+    const html =
+      '<button class="btn" id="dl-new">' + btnLabel + '</button>' +
+      (r.docs.length
+        ? '<div class="shsec" style="margin:14px 4px 8px">📚 История</div>' +
+          r.docs.map(d => docCard(d, true, false)).join('')
+        : '<div class="card hint">' + emptyHint + '</div>');
+    const el = screen(title, html, true);
+    el.querySelector('#dl-new').onclick = onCreate;
+  };
 }
+
+const S_prihodList = docListScreen('Поступление товара', 'prihod',
+  '+ Создать поступление', () => push(S_prihod),
+  'Поступлений ещё не было — создай первое кнопкой сверху.');
+const S_transferList = docListScreen('Перемещения', 'transfer_out',
+  '+ Создать перемещение', () => push(S_transferPick),
+  'Перемещений между сотрудниками ещё не было.');
+const S_initialList = docListScreen('Начальные остатки', 'initial',
+  '+ Ввести остатки', () => push(S_countSheet, 'initial'),
+  'Начальные остатки ещё не вводились.');
+const S_vydachaList = docListScreen('Выдать товар', 'vydacha',
+  '+ Создать выдачу', () => push(S_chooseSeller, 'vydacha'),
+  'Выдач товара ещё не было.');
+const S_sdachaList = docListScreen('Принять товар', 'sdacha',
+  '+ Создать приём', () => push(S_chooseSeller, 'sdacha'),
+  'Приёмов товара ещё не было.');
+const S_pricesList = docListScreen('Управление ценами', 'price_change',
+  '+ Изменить цены', () => push(S_prices),
+  'Изменений цен продажи ещё не было — меняй кнопкой сверху.');
 
 window.onDocToggle = async function (ev, id) {
   const det = ev.target;
@@ -1026,10 +1048,10 @@ async function S_sklad() {
   const el = screen('', html);
   bindMenu(el, {
     prihod: () => push(S_prihodList),
-    transfer: () => push(S_transferPick),
+    transfer: () => push(S_transferList),
     products: () => push(S_products),
     inv: () => push(S_invStart),
-    init: () => push(S_countSheet, 'initial'),
+    init: () => push(S_initialList),
     sup: () => push(S_suppliers),
   });
   el.querySelector('#sk-q').addEventListener('input', e => {
@@ -1058,28 +1080,13 @@ async function S_chooseSeller(mode) {
     : '<div class="card hint">' + (forSdacha
         ? 'Ни у кого нет товара на руках — принимать нечего.'
         : 'Продавцов пока нет — они появятся после регистрации в боте.') + '</div>';
-  const el = screen(forSdacha ? 'Приём товара' : 'Кому выдать',
-    html + '<div id="hist"></div>', true);
-  histBlock(el, forSdacha ? 'sdacha' : 'vydacha');
+  const el = screen(forSdacha ? 'Приём товара' : 'Кому выдать', html, true);
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-pick]');
     if (!c) return;
     stack.pop(); // после операции «назад» вернёт сразу на склад
     push(forSdacha ? S_sdacha : S_vydacha, +c.dataset.pick);
   });
-}
-
-async function S_prihodList() {
-  // вход в поступления: сначала список ранее созданных документов
-  const r = await api('/api/docs?type=prihod&limit=30');
-  const html =
-    '<button class="btn" id="ph-new">+ Создать поступление</button>' +
-    (r.docs.length
-      ? '<div class="shsec" style="margin:14px 4px 8px">📚 Поступления</div>' +
-        r.docs.map(d => docCard(d, true, false)).join('')
-      : '<div class="card hint">Поступлений ещё не было — создай первое кнопкой сверху.</div>');
-  const el = screen('Поступление товара', html, true);
-  el.querySelector('#ph-new').onclick = () => push(S_prihod);
 }
 
 async function S_prihod() {
@@ -1346,9 +1353,9 @@ async function S_realiz() {
   const el = screen('', html);
   bindMenu(el, {
     sellers: () => push(S_sellers),
-    vyd: () => push(S_chooseSeller, 'vydacha'),
-    sd: () => push(S_chooseSeller, 'sdacha'),
-    prices: () => push(S_prices),
+    vyd: () => push(S_vydachaList),
+    sd: () => push(S_sdachaList),
+    prices: () => push(S_pricesList),
   });
   // совладельцу и админу — напоминание обработать расчёты с сотрудниками
   if (ME.role === 'admin' || ME.role === 'owner') {
@@ -1653,8 +1660,7 @@ async function S_transferPick() {
         '<div class="sub">на руках на ' + fmtM(s.hands_value) + '</div></div>' +
         '<div class="r hint">›</div></div></div>').join('')
     : '<div class="card hint">Ни у кого нет товара на руках — перемещать нечего.</div>';
-  const el = screen('Перемещение товара', html + '<div id="hist"></div>', true);
-  histBlock(el, 'transfer_out');
+  const el = screen('Перемещение товара', html, true);
   el.addEventListener('click', e => {
     const c = e.target.closest('[data-pick]');
     if (!c) return;
@@ -3440,10 +3446,8 @@ async function S_prices() {
     '<div class="card hint small">Меняй цену прямо в окошке — рядом появится кнопка ✓ ' +
     'для сохранения.</div>' +
     '<div class="field"><input id="pz-q" placeholder="🔍 Поиск товара…"></div>' +
-    '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>' +
-    '<div id="hist"></div>';
-  const el = screen('Управление ценами', html, true);
-  histBlock(el, 'price_change');
+    '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>';
+  const el = screen('Изменение цен', html, true);
   el.querySelectorAll('#pz-mode button').forEach((b, i) => {
     b.onclick = () => {
       PRICES_MODE = i === 0 ? 'retail' : 'cost';
