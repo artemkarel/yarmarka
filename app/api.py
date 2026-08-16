@@ -438,6 +438,28 @@ def api_sdacha(request: Request, payload: dict = Body(...)):
     return {"doc": doc}
 
 
+@app.post("/api/docs/order")
+def api_order(request: Request, payload: dict = Body(...)):
+    """Заявка продавца на подготовку товара — уведомление уходит кладовщикам."""
+    u = current_user(request)
+    conn = db.get()
+    doc = services.doc_order(conn, u, payload.get("lines"), payload.get("comment"))
+    keepers = [dict(r) for r in conn.execute(
+        "SELECT * FROM users WHERE active=1 AND role='keeper'")]
+    if not keepers:  # кладовщика нет — заявку получают владельцы
+        keepers = [dict(r) for r in conn.execute(
+            "SELECT * FROM users WHERE active=1 AND role IN ('admin','owner') AND id<>?",
+            (u["id"],))]
+    lines_txt = "\n".join(
+        f"{i + 1}. {ln['name']} — {_fq(ln['qty'])} {ln['unit']}"
+        for i, ln in enumerate(doc["lines"]))
+    for k in keepers:
+        bot.notify_user(k, f"📝 Заявка на товар от {doc['seller_name']}:\n{lines_txt}"
+                           + (f"\n\n💬 {doc['comment']}" if doc.get("comment") else "")
+                           + "\n\nПодготовьте к выдаче — заявка в «Журнале».")
+    return {"doc": doc}
+
+
 @app.post("/api/docs/incass")
 def api_incass(request: Request, payload: dict = Body(...)):
     u = current_user(request)

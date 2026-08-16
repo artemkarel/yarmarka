@@ -480,21 +480,23 @@ def _sstock_set(conn, seller_id, pid, hands, shelf):
 
 
 def seller_stock(conn, seller_id):
-    """Товар у продавца: на руках и на полке, с ценами."""
+    """Товар у продавца: на руках и на полке. Цена — зафиксированная при выдаче."""
     rows = conn.execute(
-        "SELECT ss.product_id, ss.qty_hands, ss.qty_shelf, p.name, p.unit, p.retail_price "
+        "SELECT ss.product_id, ss.qty_hands, ss.qty_shelf, ss.avg_retail, "
+        "p.name, p.unit, p.retail_price "
         "FROM seller_stock ss JOIN products p ON p.id = ss.product_id "
         "WHERE ss.seller_id=? AND (ss.qty_hands > ? OR ss.qty_shelf > ?) ORDER BY p.name",
         (seller_id, EPS, EPS),
     ).fetchall()
     hands, shelf = [], []
     for r in rows:
+        price = r["avg_retail"] if r["avg_retail"] > EPS else r["retail_price"]
         base = {"product_id": r["product_id"], "name": r["name"], "unit": r["unit"],
-                "retail_price": r["retail_price"]}
+                "retail_price": r2(price)}
         if r["qty_hands"] > EPS:
-            hands.append({**base, "qty": r["qty_hands"], "value": r2(r["qty_hands"] * r["retail_price"])})
+            hands.append({**base, "qty": r["qty_hands"], "value": r2(r["qty_hands"] * price)})
         if r["qty_shelf"] > EPS:
-            shelf.append({**base, "qty": r["qty_shelf"], "value": r2(r["qty_shelf"] * r["retail_price"])})
+            shelf.append({**base, "qty": r["qty_shelf"], "value": r2(r["qty_shelf"] * price)})
     return {
         "hands": hands,
         "shelf": shelf,
@@ -530,7 +532,8 @@ def _line_insert(conn, doc_id, p, **f):
         "qty_sold, qty_before, purchase_price, retail_price) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (doc_id, p["id"], f.get("qty", 0), f.get("qty_shelf", 0), f.get("qty_to_wh", 0),
          f.get("qty_to_shelf", 0), f.get("qty_sold", 0), f.get("qty_before"),
-         f.get("purchase_price", p["purchase_price"]), p["retail_price"]),
+         f.get("purchase_price", p["purchase_price"]),
+         f.get("retail_price", p["retail_price"])),
     )
 
 
@@ -611,6 +614,19 @@ def _seller_avg(conn, seller_id, pid):
 def _seller_avg_set(conn, seller_id, pid, avg):
     conn.execute("UPDATE seller_stock SET avg_cost=? WHERE seller_id=? AND product_id=?",
                  (max(avg, 0.0), seller_id, pid))
+
+
+def _seller_ret(conn, seller_id, pid):
+    """Средняя цена продажи товара на руках — зафиксирована при выдаче."""
+    r = conn.execute(
+        "SELECT avg_retail FROM seller_stock WHERE seller_id=? AND product_id=?",
+        (seller_id, pid)).fetchone()
+    return float(r["avg_retail"]) if r else 0.0
+
+
+def _seller_ret_set(conn, seller_id, pid, v):
+    conn.execute("UPDATE seller_stock SET avg_retail=? WHERE seller_id=? AND product_id=?",
+                 (max(v, 0.0), seller_id, pid))
 
 
 # ---------- создание документов (по умолчанию черновик не проводится сам) ----------
@@ -728,10 +744,13 @@ def doc_sdacha(conn, user, seller_id, date, lines, share_pct, comment=None, post
             qty = to_wh + to_shelf + sold
             if qty < EPS:
                 continue
+            # цена — та, по которой товар выдавался, а не текущая из номенклатуры:
+            # смена цен не пересчитывает то, что уже на руках
+            price = _seller_ret(conn, seller_id, p["id"]) or p["retail_price"]
             _line_insert(conn, doc_id, p, qty=qty, qty_to_wh=to_wh, qty_to_shelf=to_shelf,
-                         qty_sold=sold)
-            sold_total += sold * p["retail_price"]
-            returned_total += (to_wh + to_shelf) * p["retail_price"]
+                         qty_sold=sold, retail_price=r2(price))
+            sold_total += sold * price
+            returned_total += (to_wh + to_shelf) * price
         money = -returned_total * share_pct / 100.0
         conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
                      (r2(sold_total), r2(money), doc_id))
@@ -790,23 +809,47 @@ def doc_transfer(conn, user, from_id, to_id, date, lines, share_pct, comment=Non
                 raise ValueError(f"{p['name']}: у отправителя на руках только {hands_f:g} "
                                  f"{p['unit']}")
             avg_f = _seller_avg(conn, from_id, p["id"])
+            ret_f = _seller_ret(conn, from_id, p["id"]) or p["retail_price"]
             hands_t, shelf_t = _sstock(conn, to_id, p["id"])
             avg_t = _seller_avg(conn, to_id, p["id"])
+            ret_t = _seller_ret(conn, to_id, p["id"])
             base_t = hands_t + shelf_t
             new_avg_t = ((base_t * avg_t + qty * avg_f) / (base_t + qty)
                          if (base_t + qty) > EPS else avg_f)
+            new_ret_t = ((base_t * ret_t + qty * ret_f) / (base_t + qty)
+                         if (base_t + qty) > EPS and ret_t > EPS else ret_f)
             _sstock_set(conn, from_id, p["id"], hands_f - qty, shelf_f)
             _sstock_set(conn, to_id, p["id"], hands_t + qty, shelf_t)
             _seller_avg_set(conn, to_id, p["id"], new_avg_t)
-            _line_insert(conn, out_id, p, qty=qty, purchase_price=r2(avg_f))
-            _line_insert(conn, in_id, p, qty=qty, purchase_price=r2(avg_f))
-            total += qty * p["retail_price"]
+            _seller_ret_set(conn, to_id, p["id"], new_ret_t)
+            _line_insert(conn, out_id, p, qty=qty, purchase_price=r2(avg_f),
+                         retail_price=r2(ret_f))
+            _line_insert(conn, in_id, p, qty=qty, purchase_price=r2(avg_f),
+                         retail_price=r2(ret_f))
+            total += qty * ret_f
         money = r2(total * share_pct / 100.0)
         conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
                      (r2(total), -money, out_id))
         conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
                      (r2(total), money, in_id))
     return doc_get(conn, out_id)
+
+
+def doc_order(conn, user, lines, comment=None):
+    """Заявка продавца на подготовку товара: остатки не трогает, кладовщик
+    получает уведомление и собирает заказ к выдаче."""
+    _need_lines(lines)
+    with _lock, conn:
+        doc_id = _doc_insert(conn, "order", now_utc()[:10], user["id"],
+                             seller_id=user["id"], comment=comment, status="posted")
+        total = 0.0
+        for ln in lines:
+            p = _product(conn, ln.get("product_id"))
+            qty = _num(ln.get("qty"), p["name"])
+            _line_insert(conn, doc_id, p, qty=qty)
+            total += qty * p["retail_price"]
+        conn.execute("UPDATE docs SET amount=? WHERE id=?", (r2(total), doc_id))
+    return doc_get(conn, doc_id)
 
 
 def doc_price_change(conn, user, changes):
@@ -873,8 +916,15 @@ def post_doc(conn, user, doc_id):
                 base_mass = hands + shelf
                 new_avg = ((base_mass * avg + cost_wh) / (base_mass + q_wh)
                            if (base_mass + q_wh) > EPS else unit_cost)
+                # цена продажи фиксируется на момент выдачи (l["retail_price"])
+                ret = _seller_ret(conn, sid, pid)
+                new_ret = ((base_mass * ret + q_wh * l["retail_price"])
+                           / (base_mass + q_wh)
+                           if (base_mass + q_wh) > EPS and ret > EPS
+                           else l["retail_price"])
                 _sstock_set(conn, sid, pid, hands + l["qty"], shelf - q_shelf)
                 _seller_avg_set(conn, sid, pid, new_avg)
+                _seller_ret_set(conn, sid, pid, new_ret)
                 conn.execute("UPDATE doc_lines SET purchase_price=? WHERE id=?",
                              (r2(unit_cost), l["id"]))
         elif t == "sdacha":
@@ -1029,6 +1079,8 @@ def void_doc(conn, user, doc_id):
             conn.execute("UPDATE docs SET status='void' WHERE id=?", (to_doc["id"],))
         elif t == "initial":
             raise ValueError("Начальные остатки нельзя отменить — исправьте инвентаризацией")
+        elif t == "order":
+            pass  # заявка не влияет на остатки — сторно просто закрывает её
         else:
             raise ValueError("Этот документ нельзя отменить")
         conn.execute("UPDATE docs SET status='void' WHERE id=?", (doc_id,))

@@ -182,6 +182,12 @@ def _migrate(conn):
     scols = {r["name"] for r in conn.execute("PRAGMA table_info(seller_stock)")}
     if "avg_cost" not in scols:
         conn.execute("ALTER TABLE seller_stock ADD COLUMN avg_cost REAL NOT NULL DEFAULT 0")
+    if "avg_retail" not in scols:
+        # цена продажи фиксируется при выдаче: смена цен не пересчитывает
+        # товар, который уже на руках у продавцов
+        conn.execute("ALTER TABLE seller_stock ADD COLUMN avg_retail REAL NOT NULL DEFAULT 0")
+        conn.execute("UPDATE seller_stock SET avg_retail = COALESCE("
+                     "(SELECT retail_price FROM products p WHERE p.id = product_id), 0)")
 
     ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
     if "last_seen" not in ucols:

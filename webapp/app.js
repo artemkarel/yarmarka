@@ -461,6 +461,7 @@ const DOC_META = {
   incass: ['💳', 'Инкассация'], cash: ['💵', 'Наличные'], writeoff: ['📉', 'Списание'],
   surplus: ['📈', 'Оприходование'], price_change: ['🏷', 'Смена цен'],
   transfer_out: ['📤', 'Передача (отдал)'], transfer_in: ['📥', 'Передача (принял)'],
+  order: ['📝', 'Заявка на товар'],
 };
 
 function statusBadge(d) {
@@ -947,15 +948,62 @@ async function S_skladView() {
     NF3.format(r.totals.kg) + '</div></div>' +
     '<div class="tile"><div class="tl">Позиций</div><div class="tv">' + r.rows.length +
     '</div></div></div>' +
+    '<button class="btn" id="sv-order">📝 Заказать товар к выдаче</button>' +
     '<div class="field"><input id="sv-q" placeholder="Поиск товара…"></div>' +
     '<div class="card">' + (rows || '<div class="hint">Склад пуст</div>') + '</div>';
   const el = screen('', html);
+  el.querySelector('#sv-order').onclick = () => push(S_orderNew);
   el.querySelector('#sv-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(row => {
       row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
     });
   });
+}
+
+// заявка на подготовку товара: продавец выбирает из наличия, кладовщику — уведомление
+async function S_orderNew() {
+  const r = await api('/api/stock');
+  const rows = r.rows.filter(x => x.qty > 0.0005);
+  const html =
+    '<div class="card hint small">Укажи, сколько подготовить к выдаче. Кладовщик получит ' +
+    'уведомление и соберёт заказ.</div>' +
+    '<div class="field"><input id="or-q" placeholder="🔍 Поиск товара…"></div>' +
+    '<div class="card" id="or-list">' + (rows.length ? rows.map((x, i) =>
+      '<div class="row prow" data-name="' + esc(x.name.toLowerCase()) + '">' +
+      '<div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' +
+      esc(x.name) + '</div><div class="sub">на складе ' + fmtQ(x.qty, x.unit) +
+      '</div></div>' +
+      '<div class="r" style="width:104px"><input inputmode="decimal" class="oin" ' +
+      'data-pid="' + x.product_id + '" data-max="' + x.qty + '" placeholder="0"></div>' +
+      '</div>').join('') : '<div class="hint">Склад пуст — заказывать нечего</div>') +
+    '</div>' +
+    '<div class="field"><label>Комментарий (необязательно)</label>' +
+    '<input id="or-comment" placeholder="Например: к пятнице, на ярмарку в Казань"></div>' +
+    '<button class="btn" id="or-send">Отправить заявку</button>';
+  const el = screen('Заявка на товар', html, true);
+  floatSave(el, '#or-send');
+  el.querySelector('#or-q').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase().trim();
+    el.querySelectorAll('.prow').forEach(row => {
+      row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
+    });
+  });
+  el.querySelector('#or-send').onclick = async () => {
+    const lines = [];
+    el.querySelectorAll('.oin').forEach(inp => {
+      const q = pnum(inp.value);
+      if (q > 0) lines.push({ product_id: +inp.dataset.pid, qty: q });
+    });
+    if (!lines.length) return toast('Укажи количество хотя бы по одной позиции');
+    try {
+      await api('/api/docs/order', 'POST', {
+        lines, comment: el.querySelector('#or-comment').value.trim(),
+      });
+      toast('Заявка отправлена — кладовщик получил уведомление ✓', true);
+      back();
+    } catch (e) { toast(e.message); }
+  };
 }
 
 // аналитика для продавца: обороты всех по ценам продажи
@@ -1295,13 +1343,14 @@ async function S_invCount(docId) {
     '<div class="card" id="ic-list">' + rows + '</div>' +
     '';
   const el = screen('Инвентаризация', html, true);
-  // «Сохранить» и «Провести» закреплены сверху справа — видны в любом месте списка
-  const bar = document.createElement('div');
-  bar.className = 'topact';
-  bar.innerHTML =
-    '<button class="ta-sec" id="ic-save" title="Сохранить подсчёт">💾</button>' +
-    '<button class="ta-main" id="ic-post">Провести</button>';
-  document.body.appendChild(bar);
+  // кнопки живут в шапке; шапка липкая — видна в любом месте списка
+  const shead = el.querySelector('.subhead');
+  shead.classList.add('sticky');
+  shead.insertAdjacentHTML('beforeend',
+    '<div class="subact">' +
+    '<button class="ta-sec" id="ic-save">Сохранить</button>' +
+    '<button class="ta-main" id="ic-post">Провести</button></div>');
+  const bar = shead;
   bindGroupedSheet(el, '#ic-list', '#ic-q');
   const collect = () => {
     const lines = [];
@@ -3843,7 +3892,7 @@ const DOC_GROUPS = [
   ['', 'Все', null],
   ['draft', 'Черновики', null],
   ['prihod', 'Поступления', ['prihod', 'initial']],
-  ['vydacha', 'Выдачи', ['vydacha']],
+  ['vydacha', 'Выдачи', ['vydacha', 'order']],
   ['sdacha', 'Приёмки', ['sdacha']],
   ['transfer', 'Передачи', ['transfer_out', 'transfer_in']],
   ['money', 'Деньги', ['incass', 'cash']],
