@@ -488,7 +488,7 @@ const ROW_ICONS = {
   book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6c-2-1.4-4.5-2-8-2v14c3.5 0 6 .6 8 2 2-1.4 4.5-2 8-2V4c-3.5 0-6 .6-8 2Z"/><path d="M12 6v14"/></svg>',
   file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2.5H6v19h12v-15Z"/><path d="M14 2.5v4.5h4"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
   people: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 20c.8-3.2 3.4-5 6.5-5s5.7 1.8 6.5 5"/><circle cx="17" cy="9" r="2.6"/><path d="M16 15.2c2.6.2 4.6 1.8 5.3 4.3"/></svg>',
-  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
   arrowup: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V6"/><path d="m6 12 6-6 6 6"/></svg>',
   box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5Z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>',
@@ -761,6 +761,43 @@ function attachProductSearch(el, products, opts) {
 }
 
 // строки «сначала добавь строку — потом ищи позицию в ней»
+// ведомость по группам — как в номенклатуре: тап по названию сворачивает группу
+function groupedSheet(products, rowFn) {
+  const groups = [];
+  products.forEach(p => {
+    const g = p.group_name || 'Без группы';
+    if (!groups.length || groups[groups.length - 1].name !== g) {
+      groups.push({ name: g, items: [] });
+    }
+    groups[groups.length - 1].items.push(p);
+  });
+  let n = 0;
+  return groups.map(g =>
+    '<div class="pgroup"><button class="pghead">' + esc(g.name) +
+    '<span class="pgarr">▾</span></button>' +
+    '<div class="pgbody"><div class="pgin">' +
+    g.items.map(p => rowFn(p, ++n)).join('') +
+    '</div></div></div>').join('');
+}
+
+function bindGroupedSheet(el, boxSel, qSel) {
+  el.querySelector(qSel).addEventListener('input', e => {
+    const q = e.target.value.toLowerCase().trim();
+    el.querySelectorAll(boxSel + ' .prow').forEach(r => {
+      r.style.display = fuzzyMatch(q, r.dataset.name) ? '' : 'none';
+    });
+    el.querySelectorAll(boxSel + ' .pgroup').forEach(g => {
+      if (q) g.classList.remove('closed'); // при поиске раскрываем всё
+      const any = [...g.querySelectorAll('.prow')].some(r => r.style.display !== 'none');
+      g.style.display = any ? '' : 'none';
+    });
+  });
+  el.addEventListener('click', e => {
+    const gh = e.target.closest(boxSel + ' .pghead');
+    if (gh) gh.parentElement.classList.toggle('closed');
+  });
+}
+
 function lineSearchHtml(i, placeholder) {
   // слева порядковый номер, на месте названия — строка поиска
   return '<div class="line"><div class="linehead">' +
@@ -1240,29 +1277,24 @@ async function S_invCount(docId) {
   ]);
   const facts = {};
   d.doc.lines.forEach(l => { facts[l.product_id] = l.qty; });
-  const rows = products.filter(p => !p.archived).map((p, i) =>
+  const rows = groupedSheet(products.filter(p => !p.archived), (p, n) =>
     '<div class="row prow" data-name="' + esc(p.name.toLowerCase()) + '">' +
-    '<div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' + esc(p.name) +
+    '<div class="l" style="flex:1"><div class="name small">' + n + '. ' + esc(p.name) +
     '</div><div class="sub">учёт: ' + fmtQ(p.stock_qty, p.unit) + '</div></div>' +
     '<div class="r" style="width:104px"><input inputmode="decimal" class="fin" data-pid="' +
     p.id + '" value="' + (facts[p.id] != null ? facts[p.id] : '') +
-    '" placeholder="факт"></div></div>').join('');
+    '" placeholder="факт"></div></div>');
   const html =
     '<div class="card hint small">Ведомость №' + docId + ' (черновик). Считай в несколько ' +
     'заходов: вноси факты и жми «Сохранить подсчёт». Остатки не меняются до проведения. ' +
     'Пустые поля при проведении не трогаются.</div>' +
     '<div class="field"><input id="ic-q" placeholder="🔍 Поиск товара…"></div>' +
-    '<div class="card">' + rows + '</div>' +
+    '<div class="card" id="ic-list">' + rows + '</div>' +
     '<button class="btn secondary" id="ic-save">💾 Сохранить подсчёт</button>' +
     '<button class="btn" id="ic-post">Провести ведомость</button>';
   const el = screen('Инвентаризация', html, true);
   floatSave(el, '#ic-save'); // ✓ сохраняет подсчёт; проведение — кнопкой внизу
-  el.querySelector('#ic-q').addEventListener('input', e => {
-    const q = e.target.value.toLowerCase().trim();
-    el.querySelectorAll('.prow').forEach(row => {
-      row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
-    });
-  });
+  bindGroupedSheet(el, '#ic-list', '#ic-q');
   const collect = () => {
     const lines = [];
     el.querySelectorAll('.fin').forEach(inp => {
@@ -1299,26 +1331,22 @@ async function S_invCount(docId) {
 async function S_countSheet(kind) {
   const products = (await getProducts(true)).filter(p => !p.archived);
   const isInv = kind === 'inventory';
-  const rows = products.map(p =>
+  const rows = groupedSheet(products, (p, n) =>
     '<div class="row prow" data-name="' + esc(p.name.toLowerCase()) + '">' +
-    '<div class="l" style="flex:1"><div class="name small">' + esc(p.name) + '</div>' +
+    '<div class="l" style="flex:1"><div class="name small">' + n + '. ' + esc(p.name) + '</div>' +
     (isInv ? '<div class="sub">учёт: ' + fmtQ(p.stock_qty, p.unit) + '</div>' : '') + '</div>' +
     '<div class="r" style="width:110px"><input inputmode="decimal" class="fin" data-pid="' + p.id +
-    '" placeholder="' + (isInv ? 'факт' : '0') + '"></div></div>').join('');
+    '" placeholder="' + (isInv ? 'факт' : '0') + '"></div></div>');
   const html =
     '<div class="field"><label>Дата</label><input type="date" id="cs-date" value="' + today() + '"></div>' +
     '<div class="field"><input id="cs-q" placeholder="🔍 Поиск товара…"></div>' +
-    '<div class="card">' + (rows || '<div class="hint">Номенклатура пуста</div>') + '</div>' +
+    '<div class="card" id="cs-list">' + (rows || '<div class="hint">Номенклатура пуста</div>') +
+    '</div>' +
     '<button class="btn" id="cs-save">' + (isInv ? 'Провести инвентаризацию' : 'Сохранить остатки') +
     '</button>';
   const el = screen(isInv ? 'Инвентаризация' : 'Начальные остатки', html, true);
   floatSave(el, '#cs-save');
-  el.querySelector('#cs-q').addEventListener('input', e => {
-    const q = e.target.value.toLowerCase().trim();
-    el.querySelectorAll('.prow').forEach(r => {
-      r.style.display = fuzzyMatch(q, r.dataset.name) ? '' : 'none';
-    });
-  });
+  bindGroupedSheet(el, '#cs-list', '#cs-q');
   el.querySelector('#cs-save').onclick = async () => {
     const lines = [];
     el.querySelectorAll('.fin').forEach(inp => {
@@ -1566,7 +1594,7 @@ async function S_sdacha(sid) {
   }
   const rows = hands.map((h, i) =>
     '<div class="line" data-i="' + i + '"><div class="linehead"><div style="flex:1">' +
-    '<div class="name">' + esc(h.name) + '</div>' +
+    '<div class="name">' + (i + 1) + '. ' + esc(h.name) + '</div>' +
     '<div class="sub hint small">на руках ' + fmtQ(h.qty, h.unit) + ' • ' +
     fmtM(h.retail_price) + '/' + h.unit + '</div></div></div>' +
     '<div class="grid3">' +
@@ -2518,11 +2546,7 @@ async function S_map(opts) {
     '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
     '<button class="calarr left" id="cal-prev">‹</button>' +
     '<button class="calarr right" id="cal-next">›</button></div>' +
-    pillRowHtml(sel, 'mp-q-btn', false) +
-    '<div class="searchrow" id="mp-qrow"' + (sel.q ? '' : ' hidden') + '>' +
-    '<span class="sico">🔍</span>' +
-    '<input id="mp-q" placeholder="Поиск на карте…" autocomplete="off" value="' +
-    esc(sel.q || '') + '"></div>' +
+    pillRowHtml(sel, 'mp-q', false) +
     '<div id="map-box"></div>' +
     '<div class="hint small" style="margin-top:8px" id="mp-count"></div>';
   const el = screen('Карта событий', html, true);
@@ -2643,12 +2667,7 @@ async function S_map(opts) {
     clearTimeout(qInp._t);
     qInp._t = setTimeout(() => { sel.q = qInp.value; redraw(); }, 250);
   });
-  el.querySelector('#mp-q-btn').onclick = () => {
-    const row = el.querySelector('#mp-qrow');
-    row.hidden = !row.hidden;
-    el.querySelector('#mp-q-btn').classList.toggle('on', !row.hidden || !!sel.q);
-    if (!row.hidden) qInp.focus();
-  };
+  bindSearchPill(el, 'mp-q');
 
   // календарь: те же жесты и выбор, что в ленте точек
   const stripEl = el.querySelector('#cal-strip');
@@ -2718,11 +2737,14 @@ function ctText(sel) {
 }
 
 function pillRowHtml(sel, qid, withMap) {
-  return '<div class="pillrow">' +
-    '<button class="pill' + (sel.q ? ' on' : '') + '" id="' + qid + '" title="Поиск">' +
+  return '<div class="pillrow' + (sel.q ? ' searching' : '') + '">' +
+    '<div class="pill searchpill">' +
     '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"' +
-    ' stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>' +
-    '<path d="m20 20-3.8-3.8"/></svg></button>' +
+    ' stroke-width="2.2" stroke-linecap="round" style="flex:none"><circle cx="11" cy="11" r="7"/>' +
+    '<path d="m20 20-3.8-3.8"/></svg>' +
+    '<input id="' + qid + '" placeholder="Поиск" autocomplete="off" value="' +
+    esc(sel.q || '') + '">' +
+    '<button class="spx" id="' + qid + '-x"' + (sel.q ? '' : ' hidden') + '>✕</button></div>' +
     '<button class="pill" id="fl-open">' +
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"' +
     ' stroke-width="2.2" stroke-linecap="round" aria-hidden="true">' +
@@ -2740,6 +2762,28 @@ function pillRowHtml(sel, qid, withMap) {
 function cityHist() {
   try { return JSON.parse(localStorage.getItem('cityHist') || '[]'); }
   catch (e) { return []; }
+}
+
+// поиск-пилюля: тап — плавно расширяется на весь ряд, остальные пилюли прячутся
+function bindSearchPill(el, qid) {
+  const inp = el.querySelector('#' + qid);
+  const x = el.querySelector('#' + qid + '-x');
+  const row = inp.closest('.pillrow');
+  inp.addEventListener('focus', () => { row.classList.add('searching'); x.hidden = false; });
+  inp.addEventListener('blur', () => {
+    if (!inp.value.trim()) {
+      row.classList.remove('searching');
+      x.hidden = true;
+    }
+  });
+  x.addEventListener('pointerdown', e => {
+    e.preventDefault(); // раньше blur — иначе кнопка исчезнет до клика
+    inp.value = '';
+    inp.dispatchEvent(new Event('input'));
+    row.classList.remove('searching');
+    x.hidden = true;
+    inp.blur();
+  });
 }
 
 // выбор городов: история последних, вводишь — сразу подсказки, выбор нескольких
@@ -2946,11 +2990,7 @@ async function S_places() {
     '<div class="dstrip" id="cal-strip">' + strip + '</div></div>' +
     '<button class="calarr left" id="cal-prev">‹</button>' +
     '<button class="calarr right" id="cal-next">›</button></div>' +
-    pillRowHtml(PL_STATE, 'pl-q-btn', true) +
-    '<div class="searchrow" id="pl-qrow"' + (PL_STATE.q ? '' : ' hidden') + '>' +
-    '<span class="sico">🔍</span>' +
-    '<input id="pl-q" placeholder="Поиск точек и мероприятий…" autocomplete="off" value="' +
-    esc(PL_STATE.q || '') + '"></div>' +
+    pillRowHtml(PL_STATE, 'pl-q', true) +
     '<div class="addline"><span data-add="event">+ мероприятие</span>' +
     '<span data-add="point">+ точка</span></div>' +
     '<div id="pl-list">' + listBlock() + '</div>';
@@ -2969,13 +3009,7 @@ async function S_places() {
     clearTimeout(qInp._t);
     qInp._t = setTimeout(() => { PL_STATE.q = qInp.value; applyAll(); }, 250);
   });
-  // лупа раскрывает и прячет строку поиска
-  el.querySelector('#pl-q-btn').onclick = () => {
-    const row = el.querySelector('#pl-qrow');
-    row.hidden = !row.hidden;
-    el.querySelector('#pl-q-btn').classList.toggle('on', !row.hidden || !!PL_STATE.q);
-    if (!row.hidden) qInp.focus();
-  };
+  bindSearchPill(el, 'pl-q');
   const applyAll = () => {
     per = perNow();
     el.querySelector('#pl-list').innerHTML = listBlock();

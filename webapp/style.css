@@ -267,8 +267,21 @@ body.sheet-open{ overflow:hidden; }
 .pillrow::-webkit-scrollbar{ display:none; }
 .pill{ flex:none; display:flex; align-items:center; gap:6px; border:none;
   background:var(--card); color:var(--text); border-radius:13px; padding:10px 11px;
-  font-size:13.5px; font-weight:600; cursor:pointer; transition:transform .12s ease; }
+  font-size:13.5px; font-weight:600; cursor:pointer; white-space:nowrap;
+  max-width:230px;
+  transition:transform .12s ease, max-width .3s ease, opacity .22s ease,
+    padding .3s ease; }
 .pill:active{ transform:scale(.96); }
+/* поиск живёт прямо в пилюле; при фокусе разъезжается на весь ряд */
+.pill.searchpill{ flex:1 1 90px; min-width:76px; max-width:none; cursor:text;
+  padding:6px 12px; }
+.searchpill input{ flex:1; min-width:30px; width:100%; border:none; background:transparent;
+  box-shadow:none; padding:5px 0; font-size:14px; border-radius:0; }
+.searchpill input:focus{ box-shadow:none; }
+.searchpill .spx{ border:none; background:transparent; color:var(--hint);
+  font-size:15px; cursor:pointer; padding:0 2px; flex:none; }
+.pillrow.searching .pill:not(.searchpill){ max-width:0; opacity:0; padding-left:0;
+  padding-right:0; overflow:hidden; pointer-events:none; }
 .pill.on{ color:var(--accent); box-shadow:inset 0 0 0 1.5px var(--accent); }
 .pill .pv{ opacity:.65; font-size:11.5px; }
 .pill .pilln{ background:var(--accent); color:var(--accent-text); border-radius:99px;
