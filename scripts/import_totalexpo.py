@@ -34,7 +34,10 @@ THEMES = {
 TITLE_RE = re.compile(
     r"<title>\s*(.+?)\s*\(([^,()]+),\s*(\d{2})\.(\d{2})\.(\d{4})\s*-\s*"
     r"(\d{2})\.(\d{2})\.(\d{4})\)", re.S)
-RUS_RE = re.compile(r"Страна.{0,300}?Россия", re.S)
+# «Место проведения: Сибэкспоцентр (Иркутск, Россия)» — признак России
+RUS_RE = re.compile(r"\([^,()]{2,40},\s*Россия\s*\)")
+VENUE_RE = re.compile(r"Место\s*проведения:\s*(?:<[^>]*>\s*)*([^<(]{3,80})")
+ORG_RE = re.compile(r"Организатор:\s*(?:<[^>]*>\s*)*([^<]{3,60})")
 
 
 def main():
@@ -80,9 +83,14 @@ def main():
                 skipped += 1
                 time.sleep(0.3)
                 continue
-            comment = " • ".join([
-                tname, f"{BASE}/expo/{eid}.aspx",
-                "totalexpo.ru — уточнить условия участия"])
+            vm = VENUE_RE.search(page)
+            om = ORG_RE.search(page)
+            venue = re.sub(r"\s+", " ", vm.group(1)).strip(" ,") if vm else ""
+            org = re.sub(r"\s+", " ", om.group(1)).strip(" ,") if om else ""
+            comment = " • ".join(x for x in [
+                venue, ("организатор: " + org) if org else "", tname,
+                f"{BASE}/expo/{eid}.aspx",
+                "totalexpo.ru — уточнить условия участия"] if x)
             services.event_save(conn, fake_user, None, name, "Ярмарка коммерческая",
                                 city, d1, d2, None, comment[:480])
             added += 1
