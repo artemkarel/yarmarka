@@ -1189,19 +1189,29 @@ async function S_prihod() {
 // инвентаризация как процесс: Ведомость (черновик) → Подсчёт → Проведение,
 // при проведении система сама создаёт Списание (недостачи) и Оприходование (излишки)
 async function S_invStart() {
-  const r = await api('/api/docs?type=inventory&limit=50');
+  // сначала последние инвентаризации; полная ведомость — только после «Создать»
+  const r = await api('/api/docs?type=inventory&limit=30');
   const draft = r.docs.find(d => d.status === 'draft');
-  if (draft) {
-    stack.pop();
-    push(S_invCount, draft.id);
-    return;
-  }
-  try {
-    const created = await api('/api/docs/inventory', 'POST', { lines: [] });
-    toast('Создана ведомость — вноси подсчёт', true);
-    stack.pop();
-    push(S_invCount, created.doc.id);
-  } catch (e) { toast(e.message); back(); }
+  const html =
+    (draft
+      ? '<button class="btn" id="inv-go">Продолжить подсчёт от ' + dstr(draft.date) +
+        '</button>'
+      : '<button class="btn" id="inv-go">+ Новая инвентаризация</button>') +
+    (r.docs.length
+      ? '<div class="shsec" style="margin:14px 4px 8px">📚 Последние инвентаризации</div>' +
+        r.docs.map(d => docCard(d, true, false)).join('')
+      : '<div class="card hint">Инвентаризаций ещё не было. Создай первую — система ' +
+        'сверит подсчёт с учётом и сама оформит недостачи и излишки.</div>');
+  const el = screen('Инвентаризация', html, true);
+  el.querySelector('#inv-go').onclick = async () => {
+    if (draft) { push(S_invCount, draft.id); return; }
+    if (!(await confirmDlg('Создать новую ведомость инвентаризации?'))) return;
+    try {
+      const created = await api('/api/docs/inventory', 'POST', { lines: [] });
+      toast('Создана ведомость — вноси подсчёт', true);
+      push(S_invCount, created.doc.id);
+    } catch (e) { toast(e.message); }
+  };
 }
 
 async function S_invCount(docId) {
@@ -1224,10 +1234,8 @@ async function S_invCount(docId) {
     '<div class="field"><input id="ic-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card">' + rows + '</div>' +
     '<button class="btn secondary" id="ic-save">💾 Сохранить подсчёт</button>' +
-    '<button class="btn" id="ic-post">Провести ведомость</button>' +
-    '<div id="hist"></div>';
+    '<button class="btn" id="ic-post">Провести ведомость</button>';
   const el = screen('Инвентаризация', html, true);
-  histBlock(el, 'inventory');
   floatSave(el, '#ic-save'); // ✓ сохраняет подсчёт; проведение — кнопкой внизу
   el.querySelector('#ic-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
@@ -2709,7 +2717,13 @@ function pillRowHtml(sel, qid, withMap) {
     '</div>';
 }
 
-// выбор городов: как поиск — вводишь, снизу подсказки, выбирать можно несколько
+// история выбранных городов — как история поиска в ютубе
+function cityHist() {
+  try { return JSON.parse(localStorage.getItem('cityHist') || '[]'); }
+  catch (e) { return []; }
+}
+
+// выбор городов: история последних, вводишь — сразу подсказки, выбор нескольких
 function openCityPick(cities, sel, onClose) {
   const bg = document.createElement('div');
   bg.className = 'sheetbg';
@@ -2733,15 +2747,28 @@ function openCityPick(cities, sel, onClose) {
           '<button class="chip on" data-cp="' + esc(c) + '">' + esc(c) + ' ✕</button>')
           .join('') + '</div>'
       : '';
-    const sug = q
-      ? cities.filter(c => !sel.citySel.includes(c) && fuzzyMatch(q, c.toLowerCase()))
-        .slice(0, 24)
-      : [];
-    sh.querySelector('#cp-sug').innerHTML = sug.length
-      ? '<div class="chipwrap" style="margin-top:8px">' +
-        sug.map(c => '<button class="chip" data-cp="' + esc(c) + '">' + esc(c) +
+    if (q) {
+      const sug = cities.filter(c => !sel.citySel.includes(c) &&
+        fuzzyMatch(q, c.toLowerCase())).slice(0, 24);
+      sh.querySelector('#cp-sug').innerHTML = sug.length
+        ? '<div class="chipwrap" style="margin-top:8px">' +
+          sug.map(c => '<button class="chip" data-cp="' + esc(c) + '">' + esc(c) +
+            '</button>').join('') + '</div>'
+        : '<div class="hint small" style="margin:8px 4px">Такого города нет</div>';
+      return;
+    }
+    // без запроса — недавние города с возможностью очистить историю
+    const hist = cityHist().filter(c => !sel.citySel.includes(c) && cities.includes(c));
+    sh.querySelector('#cp-sug').innerHTML = hist.length
+      ? '<div class="shsec" style="display:flex;justify-content:space-between;' +
+        'align-items:center">Недавние' +
+        '<button class="chip" id="cp-clear" style="padding:4px 10px">Очистить</button></div>' +
+        '<div class="chipwrap">' +
+        hist.map(c => '<button class="chip" data-cp="' + esc(c) + '">🕐 ' + esc(c) +
           '</button>').join('') + '</div>'
-      : (q ? '<div class="hint small" style="margin:8px 4px">Такого города нет</div>' : '');
+      : (sel.citySel.length ? ''
+        : '<div class="hint small" style="margin:8px 4px">Начни вводить название — ' +
+          'города появятся снизу</div>');
   };
   inp.addEventListener('input', drawLists);
   const close = () => {
@@ -2752,11 +2779,22 @@ function openCityPick(cities, sel, onClose) {
   sh.addEventListener('click', e => {
     if (e.target.id === 'cp-done') { close(); return; }
     if (e.target.id === 'cp-reset') { sel.citySel.length = 0; drawLists(); return; }
+    if (e.target.id === 'cp-clear') {
+      localStorage.removeItem('cityHist');
+      drawLists();
+      return;
+    }
     const c = e.target.closest('[data-cp]');
     if (!c) return;
     const val = c.dataset.cp;
     const i = sel.citySel.indexOf(val);
-    if (i >= 0) sel.citySel.splice(i, 1); else sel.citySel.push(val);
+    if (i >= 0) {
+      sel.citySel.splice(i, 1);
+    } else {
+      sel.citySel.push(val);
+      const h = [val, ...cityHist().filter(x => x !== val)].slice(0, 10);
+      localStorage.setItem('cityHist', JSON.stringify(h));
+    }
     inp.value = '';
     drawLists();
   });
@@ -2765,7 +2803,7 @@ function openCityPick(cities, sel, onClose) {
   document.body.appendChild(bg);
   document.body.appendChild(sh);
   drawLists();
-  inp.focus();
+  // поле НЕ фокусируем: авто-фокус открывал клавиатуру и дёргал страницу вниз
 }
 
 function openFilterSheet(opts) {
@@ -3367,19 +3405,27 @@ async function S_broadcast() {
 }
 
 // быстрое управление ценами продажи: весь товар списком, справа — цена
+let PRICES_MODE = 'retail'; // retail | cost — что редактируем, живёт между заходами
+
 async function S_prices() {
   const products = (await getProducts(true)).filter(p => !p.archived);
+  const retail = PRICES_MODE !== 'cost';
   const rows = products.map((p, i) =>
     '<div class="row prow" data-name="' + esc(p.name.toLowerCase()) + '">' +
     '<div class="l" style="flex:1"><div class="name small">' + (i + 1) + '. ' + esc(p.name) +
-    '</div><div class="sub">себестоимость ' + fmtM(p.purchase_price) + '</div></div>' +
+    '</div><div class="sub">' +
+    (retail ? 'себестоимость ' + fmtM(p.purchase_price)
+      : 'цена продажи ' + fmtM(p.retail_price)) + '</div></div>' +
     '<div class="r" style="display:flex;gap:6px;align-items:center">' +
     '<input inputmode="decimal" class="pri" style="width:88px" data-pid="' +
-    p.id + '" data-old="' + p.retail_price + '" value="' +
-    (p.retail_price || '') + '" placeholder="цена">' +
+    p.id + '" data-old="' + (retail ? p.retail_price : p.purchase_price) + '" value="' +
+    ((retail ? p.retail_price : p.purchase_price) || '') + '" placeholder="цена">' +
     '<button class="chip psave" data-pid="' + p.id + '" hidden>✓</button></div></div>')
     .join('');
   const html =
+    '<div class="seg" id="pz-mode" style="margin-bottom:10px">' +
+    '<button' + (retail ? ' class="on"' : '') + '>Цены продажи</button>' +
+    '<button' + (retail ? '' : ' class="on"') + '>Себестоимость</button></div>' +
     '<div class="card hint small">Меняй цену прямо в окошке — рядом появится кнопка ✓ ' +
     'для сохранения.</div>' +
     '<div class="field"><input id="pz-q" placeholder="🔍 Поиск товара…"></div>' +
@@ -3387,6 +3433,12 @@ async function S_prices() {
     '<div id="hist"></div>';
   const el = screen('Управление ценами', html, true);
   histBlock(el, 'price_change');
+  el.querySelectorAll('#pz-mode button').forEach((b, i) => {
+    b.onclick = () => {
+      PRICES_MODE = i === 0 ? 'retail' : 'cost';
+      render();
+    };
+  });
   el.querySelector('#pz-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(r => {
@@ -3402,8 +3454,10 @@ async function S_prices() {
     const b = e.target.closest('.psave');
     if (!b) return;
     const inp = b.parentElement.querySelector('.pri');
+    const body = retail ? { retail_price: pnum(inp.value) }
+      : { purchase_price: pnum(inp.value) };
     try {
-      await api('/api/products/' + b.dataset.pid, 'PUT', { retail_price: pnum(inp.value) });
+      await api('/api/products/' + b.dataset.pid, 'PUT', body);
       inp.dataset.old = String(pnum(inp.value));
       b.hidden = true;
       PRODUCTS_CACHE = null;
