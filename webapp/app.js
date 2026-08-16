@@ -282,6 +282,16 @@ function screen(title, html, sub) {
       if (dx < 14 || dx <= Math.abs(dy)) return;                              // ещё не ясно
       sw.engaged = true;
       sw.w = sc().clientWidth || innerWidth;
+      // прилипшая панель на время жеста выравнивается по краям экрана
+      // и скругляется как он — едет единым монолитом, без ступеньки
+      sw.pin = document.querySelector('body > .stickyact.pinned');
+      if (sw.pin) {
+        const r = sc().getBoundingClientRect();
+        sw.pin.style.left = r.left + 'px';
+        sw.pin.style.right = (window.innerWidth - r.right) + 'px';
+        sw.pin.style.borderRadius = '28px 28px 0 0';
+        sw.pin.style.boxShadow = 'none';
+      }
       makeUnder(sw.w);
     }
     if (e.cancelable) e.preventDefault(); // пока тянем — страницу не скроллим
@@ -291,10 +301,9 @@ function screen(title, html, sub) {
     el.style.transition = 'none';
     el.style.transform = 'translateX(' + d + 'px)';
     // прилипшая панель действий едет тем же сдвигом — экран уходит монолитом
-    const pinBar = document.querySelector('body > .stickyact.pinned');
-    if (pinBar) {
-      pinBar.style.transition = 'none';
-      pinBar.style.transform = 'translateX(' + d + 'px)';
+    if (sw.pin) {
+      sw.pin.style.transition = 'none';
+      sw.pin.style.transform = 'translateX(' + d + 'px)';
     }
     if (under) {
       under.style.transition = 'none';
@@ -314,14 +323,18 @@ function screen(title, html, sub) {
     if (done) backBusy = true;
     el.style.transition = 'transform .2s ease';
     el.style.transform = done ? 'translateX(' + w + 'px)' : 'translateX(0)';
-    const pinBar = document.querySelector('body > .stickyact.pinned');
-    if (pinBar) {
-      pinBar.style.transition = 'transform .2s ease';
-      pinBar.style.transform = done ? 'translateX(' + w + 'px)' : 'translateX(0)';
+    if (s.pin) {
+      s.pin.style.transition = 'transform .2s ease';
+      s.pin.style.transform = done ? 'translateX(' + w + 'px)' : 'translateX(0)';
       if (!done) {
+        const p = s.pin;
         setTimeout(() => {
-          pinBar.style.transition = '';
-          pinBar.style.transform = '';
+          p.style.transition = '';
+          p.style.transform = '';
+          p.style.left = '';
+          p.style.right = '';
+          p.style.borderRadius = '';
+          p.style.boxShadow = '';
         }, 210);
       }
     }
@@ -3674,7 +3687,7 @@ async function S_products() {
     '<button class="btn" id="p-add">+ Добавить товар</button>' +
     '<div class="field"><input id="p-q" placeholder="Поиск…"></div>' +
     '<div class="addline" style="text-align:left;margin-top:0">' +
-    '<span id="p-order" style="margin-left:0">⇅ Порядок групп</span></div>' +
+    '<span id="p-order" style="margin-left:0">⚙️ Настройка групп</span></div>' +
     '<div class="card" id="p-list">' + (listHtml || '<div class="hint">Пусто</div>') + '</div>' +
     (arch.length
       ? '<div class="card"><h3>Архив</h3>' + arch.map(rowP).join('') + '</div>' : '');
