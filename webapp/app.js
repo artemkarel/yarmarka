@@ -235,8 +235,10 @@ function screen(title, html, sub) {
     const el = sc();
     under = document.createElement('div');
     under.id = 'screen-under';
+    // подложка привязана к вьюпорту: даже при глубокой прокрутке текущего
+    // экрана предыдущий виден со своей позиции прокрутки
     under.style.cssText = 'position:absolute; left:' + el.offsetLeft + 'px; width:' +
-      el.offsetWidth + 'px; top:' + el.offsetTop + 'px; bottom:0; overflow:hidden; ' +
+      el.offsetWidth + 'px; top:' + window.scrollY + 'px; height:100vh; overflow:hidden; ' +
       'z-index:0; pointer-events:none; transform:translateX(' + (-0.25 * w) + 'px);';
     under.innerHTML = (prev && prev.html
       ? '<div style="transform:translateY(-' + (prev.scrollY || 0) + 'px)">' + prev.html +
@@ -280,13 +282,6 @@ function screen(title, html, sub) {
       if (dx < 14 || dx <= Math.abs(dy)) return;                              // ещё не ясно
       sw.engaged = true;
       sw.w = sc().clientWidth || innerWidth;
-      // прилипшая панель действий возвращается в поток — едет вместе с экраном
-      const pinned = document.querySelector('body > .stickyact');
-      if (pinned && pinned._anchor && document.body.contains(pinned._anchor)) {
-        pinned._anchor.style.height = '0px';
-        pinned._anchor.after(pinned);
-        pinned.classList.remove('pinned');
-      }
       makeUnder(sw.w);
     }
     if (e.cancelable) e.preventDefault(); // пока тянем — страницу не скроллим
@@ -295,6 +290,12 @@ function screen(title, html, sub) {
     const el = sc();
     el.style.transition = 'none';
     el.style.transform = 'translateX(' + d + 'px)';
+    // прилипшая панель действий едет тем же сдвигом — экран уходит монолитом
+    const pinBar = document.querySelector('body > .stickyact.pinned');
+    if (pinBar) {
+      pinBar.style.transition = 'none';
+      pinBar.style.transform = 'translateX(' + d + 'px)';
+    }
     if (under) {
       under.style.transition = 'none';
       under.style.transform = 'translateX(' + (-0.25 * sw.w + d / 4).toFixed(1) + 'px)';
@@ -313,6 +314,17 @@ function screen(title, html, sub) {
     if (done) backBusy = true;
     el.style.transition = 'transform .2s ease';
     el.style.transform = done ? 'translateX(' + w + 'px)' : 'translateX(0)';
+    const pinBar = document.querySelector('body > .stickyact.pinned');
+    if (pinBar) {
+      pinBar.style.transition = 'transform .2s ease';
+      pinBar.style.transform = done ? 'translateX(' + w + 'px)' : 'translateX(0)';
+      if (!done) {
+        setTimeout(() => {
+          pinBar.style.transition = '';
+          pinBar.style.transform = '';
+        }, 210);
+      }
+    }
     if (under) {
       under.style.transition = 'transform .2s ease, opacity .2s ease';
       under.style.transform = done ? 'translateX(0)' : 'translateX(' + (-0.25 * w) + 'px)';
