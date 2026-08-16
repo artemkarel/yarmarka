@@ -3373,7 +3373,7 @@ async function S_more() {
   const showUsers = admin || vrole === 'keeper';
   const items = (seller
     ? [['history', 'clock', 'История моих операций']]
-    : (ownerish ? [['exp', 'card', 'Расходы'], ['push', 'bell', 'Рассылка сотрудникам']] : [])
+    : (ownerish ? [['exp', 'card', 'Расходы']] : [])
       .concat([['docs', 'book', 'Журнал'], ['reports', 'file', 'Отчёты']])
       .concat(showUsers ? [['users', 'people', 'Пользователи']] : [])
       .concat(admin ? [['set', 'gear', 'Настройки']] : []))
@@ -3391,7 +3391,6 @@ async function S_more() {
     docs: () => push(S_docs),
     users: () => push(S_users),
     exp: () => push(S_expenses),
-    push: () => push(S_broadcast),
     set: () => push(S_settings),
     mode: () => {
       const now = viewRole() === 'seller';

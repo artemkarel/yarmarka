@@ -87,16 +87,20 @@ def main():
                 time.sleep(0.2)
                 continue
             iso = f"2026-{mn:02d}-{d:02d}"
-            if iso < today:  # прошедшие не тащим
-                skipped += 1
-                time.sleep(0.2)
-                continue
+            prelim = False
+            if iso < today:
+                # праздник в этом году уже прошёл — заводим на следующий год той же
+                # датой с пометкой (правило вроде «вторая суббота» может сдвинуть её)
+                iso = f"2027-{mn:02d}-{d:02d}"
+                prelim = True
             rule = ""
             rm = RULE_RE.search(page)
             if rm:
                 rule = re.sub(r"\s+", " ", rm.group(1)).strip()
             comment = " • ".join(x for x in [
-                rule, "citiesdays.ru — дату уточнить у администрации"] if x)
+                rule,
+                "дата предварительная — по прошлому году" if prelim else "",
+                "citiesdays.ru — дату уточнить у администрации"] if x)
             services.event_save(conn, fake_user, None, f"День города {name}",
                                 "День города/села", name, iso, iso, None, comment)
             added += 1
