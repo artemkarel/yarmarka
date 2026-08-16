@@ -361,7 +361,7 @@ def _print_sig(doc_id):
 
 
 def _with_print(doc):
-    if doc and doc.get("type") == "vydacha":
+    if doc and doc.get("type") in ("vydacha", "opt", "sdacha"):
         doc["print_url"] = f"/print/{doc['id']}/{_print_sig(doc['id'])}"
     return doc
 
@@ -392,10 +392,13 @@ def api_vydacha(request: Request, payload: dict = Body(...)):
     need_staff(u)
     conn = db.get()
     st = services.settings_get(conn)
+    lid = payload.get("price_list_id")
+    if lid is None:
+        lid = st.get("default_price_list")
     doc = _with_print(services.doc_vydacha(
         conn, u, payload.get("seller_id"), doc_date(payload, u),
         payload.get("lines"), st["share_pct"], payload.get("comment"),
-        post=not payload.get("draft")))
+        post=not payload.get("draft"), list_id=lid))
     seller = services.user_by_id(conn, doc["seller_id"])
     if seller and doc["status"] == "posted":
         lines_txt = "\n".join(
@@ -435,6 +438,58 @@ def api_sdacha(request: Request, payload: dict = Body(...)):
                       f"Терминал: пробито {_fm(b['terminal_raw'])}, "
                       f"зачтено {_fm(b['terminal_credit'])}.\n"
                       f"{_balance_text(b['balance'])}")
+    return {"doc": doc}
+
+
+@app.get("/api/pricelists")
+def api_pricelists(request: Request):
+    u = current_user(request)
+    need_staff(u)
+    return {"lists": services.price_lists(db.get())}
+
+
+@app.post("/api/pricelists")
+def api_pricelist_create(request: Request, payload: dict = Body(...)):
+    u = current_user(request)
+    need_staff(u)
+    return {"list": services.price_list_create(db.get(), payload.get("name"))}
+
+
+@app.get("/api/pricelists/{lid}")
+def api_pricelist_get(lid: int, request: Request):
+    u = current_user(request)
+    need_staff(u)
+    return {"list": services.price_list_get(db.get(), lid)}
+
+
+@app.put("/api/pricelists/{lid}")
+def api_pricelist_set(lid: int, request: Request, payload: dict = Body(...)):
+    u = current_user(request)
+    need_staff(u)
+    return {"list": services.price_list_set(db.get(), lid, payload.get("product_id"),
+                                            payload.get("price"))}
+
+
+@app.delete("/api/pricelists/{lid}")
+def api_pricelist_delete(lid: int, request: Request):
+    u = current_user(request)
+    need_staff(u)
+    return services.price_list_delete(db.get(), lid)
+
+
+@app.post("/api/docs/opt")
+def api_opt(request: Request, payload: dict = Body(...)):
+    """Оптовая продажа со склада: отгрузка покупателю, печатается УПД."""
+    u = current_user(request)
+    need_staff(u)
+    conn = db.get()
+    st = services.settings_get(conn)
+    lid = payload.get("price_list_id")
+    if lid is None:
+        lid = st.get("default_price_list")
+    doc = _with_print(services.doc_opt(
+        conn, u, doc_date(payload, u), payload.get("lines"), payload.get("buyer"),
+        payload.get("comment"), lid, post=not payload.get("draft")))
     return {"doc": doc}
 
 
@@ -566,15 +621,18 @@ def api_transfer(request: Request, payload: dict = Body(...)):
 
 
 @app.get("/print/{doc_id}/{sig}", response_class=HTMLResponse)
-def print_vydacha(doc_id: int, sig: str):
-    """Печатная форма УПД по выдаче. Доступ по подписанной ссылке из приложения."""
+def print_doc(doc_id: int, sig: str):
+    """Печатные формы: УПД (опт), акт приёма-передачи на комиссию (выдача),
+    отчёт комиссионера (приём/сдача). Доступ по подписанной ссылке."""
     if not hmac_lib.compare_digest(sig, _print_sig(doc_id)):
         raise HTTPException(404)
     conn = db.get()
     doc = services.doc_get(conn, doc_id)
-    if doc["type"] != "vydacha":
+    if doc["type"] not in ("vydacha", "opt", "sdacha"):
         raise HTTPException(404)
     st = services.settings_get(conn)
+    company = st.get("company") or "Продавец (комитент)"
+    company_req = st.get("company_req") or ""
 
     def money(x):
         return f"{x:,.2f}".replace(",", " ").replace(".", ",")
@@ -582,19 +640,87 @@ def print_vydacha(doc_id: int, sig: str):
     def qty(x):
         return f"{x:g}".replace(".", ",")
 
-    rows = "".join(
-        f"<tr><td>{i + 1}</td><td class='l'>{ln['name']}</td><td>{ln['unit']}</td>"
-        f"<td>{qty(ln['qty'])}</td><td>{money(ln['retail_price'])}</td>"
-        f"<td>{money(ln['qty'] * ln['retail_price'])}</td></tr>"
-        for i, ln in enumerate(doc["lines"])
-    )
     d = doc["date"]
     date_ru = f"{d[8:10]}.{d[5:7]}.{d[0:4]}"
+    t = doc["type"]
+    if t == "opt":
+        title = f"Универсальный передаточный документ № {doc['id']} от {date_ru}"
+        subtitle = "Счёт-фактура и передаточный документ (акт) — оптовая поставка"
+        parties = (f"<b>Поставщик:</b> {company}"
+                   + (f"<br><span class='small'>{company_req}</span>" if company_req else "")
+                   + f"<br><b>Покупатель:</b> {doc.get('buyer') or '_____________________'}"
+                   + f"<br><b>Основание:</b> договор поставки / счёт № {doc['id']}")
+        cols = "<th>Цена, ₽</th><th>Сумма, ₽</th>"
+        note = ("Товар отгружен, претензий по количеству и качеству нет. "
+                "НДС не облагается (применяется специальный налоговый режим).")
+        sign_l, sign_r = "Товар передал (поставщик)", "Товар принял (покупатель)"
+        foot = (f"<tr><td colspan='5' class='l'>Итого к оплате</td>"
+                f"<td>{money(doc['amount'])}</td></tr>")
+    elif t == "vydacha":
+        title = f"Акт приёма-передачи товара на комиссию № {doc['id']} от {date_ru}"
+        subtitle = ("К договору комиссии: товар передаётся комиссионеру для продажи "
+                    "от имени комитента")
+        parties = (f"<b>Комитент:</b> {company}"
+                   + (f"<br><span class='small'>{company_req}</span>" if company_req else "")
+                   + f"<br><b>Комиссионер:</b> {doc['seller_name'] or ''}"
+                   + f"<br><b>Передал:</b> {doc['creator_name'] or ''}")
+        cols = "<th>Цена продажи, ₽</th><th>Сумма, ₽</th>"
+        note = (f"Товар передан на комиссию и остаётся собственностью комитента до продажи. "
+                f"Вознаграждение комиссионера — {st['share_pct']:g}% от стоимости "
+                f"проданного товара. Непроданный товар подлежит возврату.")
+        sign_l, sign_r = "Передал (комитент)", "Принял (комиссионер)"
+        foot = (f"<tr><td colspan='5' class='l'>Итого по ценам продажи</td>"
+                f"<td>{money(doc['amount'])}</td></tr>"
+                f"<tr><td colspan='5' class='l'>Расчёт за товар "
+                f"({st['share_pct']:g}%)</td><td>{money(doc['money'])}</td></tr>")
+    else:  # sdacha
+        title = f"Отчёт комиссионера № {doc['id']} от {date_ru}"
+        subtitle = "О реализации товара, принятого на комиссию (ст. 999 ГК РФ)"
+        parties = (f"<b>Комитент:</b> {company}"
+                   + (f"<br><span class='small'>{company_req}</span>" if company_req else "")
+                   + f"<br><b>Комиссионер:</b> {doc['seller_name'] or ''}")
+        cols = "<th>Цена продажи, ₽</th><th>Сумма продажи, ₽</th>"
+        share = doc["amount"] * st["share_pct"] / 100.0
+        note = (f"Отчёт составлен по итогам реализации. Вознаграждение комиссионера — "
+                f"{st['share_pct']:g}% от суммы продаж. Возвращённый товар принят "
+                f"комитентом по количеству и качеству.")
+        sign_l, sign_r = "Отчёт представил (комиссионер)", "Отчёт принял (комитент)"
+        foot = (f"<tr><td colspan='5' class='l'>Продано на сумму</td>"
+                f"<td>{money(doc['amount'])}</td></tr>"
+                f"<tr><td colspan='5' class='l'>Вознаграждение комиссионера "
+                f"({st['share_pct']:g}%)</td><td>{money(share)}</td></tr>"
+                f"<tr><td colspan='5' class='l'>К перечислению комитенту</td>"
+                f"<td>{money(doc['amount'] - share)}</td></tr>")
+
+    def line_qty(ln):
+        # в отчёте комиссионера считаем проданное, в остальных — всё количество
+        return ln["qty_sold"] if t == "sdacha" else ln["qty"]
+
+    lines = [ln for ln in doc["lines"] if line_qty(ln) > 0.0005]
+    rows = "".join(
+        f"<tr><td>{i + 1}</td><td class='l'>{ln['name']}</td><td>{ln['unit']}</td>"
+        f"<td>{qty(line_qty(ln))}</td><td>{money(ln['retail_price'])}</td>"
+        f"<td>{money(line_qty(ln) * ln['retail_price'])}</td></tr>"
+        for i, ln in enumerate(lines)
+    )
+    ret_rows = ""
+    if t == "sdacha":
+        back = [ln for ln in doc["lines"] if (ln["qty_to_wh"] + ln["qty_to_shelf"]) > 0.0005]
+        if back:
+            ret_rows = ("<h2>Возврат нереализованного товара</h2><table>"
+                        "<thead><tr><th>№</th><th>Наименование</th><th>Ед.</th>"
+                        "<th>Кол-во</th></tr></thead><tbody>" + "".join(
+                            f"<tr><td>{i + 1}</td><td class='l'>{ln['name']}</td>"
+                            f"<td>{ln['unit']}</td>"
+                            f"<td>{qty(ln['qty_to_wh'] + ln['qty_to_shelf'])}</td></tr>"
+                            for i, ln in enumerate(back)) + "</tbody></table>")
+
     html = f"""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
-<title>УПД №{doc['id']} от {date_ru}</title>
+<title>{title}</title>
 <style>
 body{{font:14px/1.45 Arial,sans-serif;color:#000;max-width:800px;margin:24px auto;padding:0 16px}}
-h1{{font-size:18px;margin:0 0 4px}} .sub{{color:#333;margin-bottom:16px}}
+h1{{font-size:18px;margin:0 0 4px}} h2{{font-size:15px;margin:22px 0 6px}}
+.sub{{color:#333;margin-bottom:16px}}
 table{{width:100%;border-collapse:collapse;margin:14px 0}}
 th,td{{border:1px solid #000;padding:6px 8px;text-align:center;font-size:13px}}
 td.l{{text-align:left}} tfoot td{{font-weight:bold}}
@@ -605,24 +731,19 @@ td.l{{text-align:left}} tfoot td{{font-weight:bold}}
 button{{font-size:15px;padding:10px 22px;cursor:pointer}}
 </style></head><body>
 <div class="noprint"><button onclick="window.print()">🖨 Печать / сохранить в PDF</button></div>
-<h1>Универсальный передаточный документ №{doc['id']} от {date_ru}</h1>
-<div class="sub">Акт приёма-передачи товара на реализацию</div>
-<p><b>Передал (кладовщик):</b> {doc['creator_name'] or ''}<br>
-<b>Принял (продавец):</b> {doc['seller_name'] or ''}</p>
+<h1>{title}</h1>
+<div class="sub">{subtitle}</div>
+<p>{parties}</p>
 <table>
-<thead><tr><th>№</th><th>Наименование товара</th><th>Ед.</th><th>Кол-во</th>
-<th>Цена, ₽</th><th>Сумма, ₽</th></tr></thead>
+<thead><tr><th>№</th><th>Наименование товара</th><th>Ед.</th><th>Кол-во</th>{cols}</tr></thead>
 <tbody>{rows}</tbody>
-<tfoot><tr><td colspan="5" class="l">Итого по ценам продажи</td>
-<td>{money(doc['amount'])}</td></tr>
-<tr><td colspan="5" class="l">К расчёту за товар ({st['share_pct']:g}%)</td>
-<td>{money(doc['money'])}</td></tr></tfoot>
+<tfoot>{foot}</tfoot>
 </table>
-<p class="small">Товар передан под реализацию. Расчёт — {st['share_pct']:g}% от стоимости
-проданного по ценам продажи; непроданный товар подлежит возврату.</p>
+{ret_rows}
+<p class="small">{note}</p>
 <div class="sig">
-<div><div class="line"></div><div class="small">Передал: подпись, дата</div></div>
-<div><div class="line"></div><div class="small">Получил: подпись, дата</div></div>
+<div><div class="line"></div><div class="small">{sign_l}: подпись, дата</div></div>
+<div><div class="line"></div><div class="small">{sign_r}: подпись, дата</div></div>
 </div>
 </body></html>"""
     return HTMLResponse(html)
@@ -957,8 +1078,10 @@ def api_settings(request: Request):
 def api_settings_put(request: Request, payload: dict = Body(...)):
     u = current_user(request)
     need_admin(u)
-    return {"settings": services.settings_set(db.get(), payload.get("share_pct"),
-                                              payload.get("commission_pct"))}
+    return {"settings": services.settings_set(
+        db.get(), payload.get("share_pct"), payload.get("commission_pct"),
+        default_price_list=payload.get("default_price_list"),
+        company=payload.get("company"), company_req=payload.get("company_req"))}
 
 
 @app.get("/", response_class=HTMLResponse)

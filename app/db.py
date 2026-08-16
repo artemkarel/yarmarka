@@ -236,7 +236,22 @@ def _migrate(conn):
       lat REAL,
       lon REAL
     );
+    CREATE TABLE IF NOT EXISTS price_lists(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS price_list_items(
+      list_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      price REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY(list_id, product_id)
+    );
     """)
+    dcols2 = {r["name"] for r in conn.execute("PRAGMA table_info(docs)")}
+    if "buyer" not in dcols2:
+        # покупатель при оптовой продаже — для УПД
+        conn.execute("ALTER TABLE docs ADD COLUMN buyer TEXT")
     # группы товаров: нормализуем регистр («ДРАЖЕ» → «Драже») и заводим порядок
     if not conn.execute("SELECT 1 FROM product_groups LIMIT 1").fetchone():
         raw = [r["g"] for r in conn.execute(

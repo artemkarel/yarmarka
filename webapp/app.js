@@ -493,7 +493,7 @@ const DOC_META = {
   incass: ['💳', 'Инкассация'], cash: ['💵', 'Наличные'], writeoff: ['📉', 'Списание'],
   surplus: ['📈', 'Оприходование'], price_change: ['🏷', 'Смена цен'],
   transfer_out: ['📤', 'Передача (отдал)'], transfer_in: ['📥', 'Передача (принял)'],
-  order: ['📝', 'Заявка на товар'],
+  order: ['📝', 'Заявка на товар'], opt: ['🏷', 'Оптовая продажа'],
 };
 
 function statusBadge(d) {
@@ -624,9 +624,22 @@ const S_vydachaList = docListScreen('Выдать товар', 'vydacha',
 const S_sdachaList = docListScreen('Принять товар', 'sdacha',
   '+ Создать приём', () => push(S_chooseSeller, 'sdacha'),
   'Приёмов товара ещё не было.');
-const S_pricesList = docListScreen('Управление ценами', 'price_change',
-  '+ Изменить цены', () => push(S_prices),
-  'Изменений цен продажи ещё не было — меняй кнопкой сверху.');
+const S_optList = docListScreen('Оптовая продажа', 'opt',
+  '+ Создать продажу', () => push(S_optNew),
+  'Оптовых продаж ещё не было — создай первую кнопкой сверху.');
+async function S_pricesList() {
+  const r = await api('/api/docs?type=price_change&limit=30');
+  const html =
+    '<button class="btn" id="dl-new">+ Изменить цены</button>' +
+    '<button class="btn secondary" id="pl-open">🏷 Прайсы направлений</button>' +
+    (r.docs.length
+      ? '<div class="shsec" style="margin:14px 4px 8px">📚 История</div>' +
+        r.docs.map(d => docCard(d, true, false)).join('')
+      : '<div class="card hint">Изменений цен продажи ещё не было.</div>');
+  const el = screen('Управление ценами', html, true);
+  el.querySelector('#dl-new').onclick = () => push(S_prices);
+  el.querySelector('#pl-open').onclick = () => push(S_priceLists);
+}
 
 window.onDocToggle = async function (ev, id) {
   const det = ev.target;
@@ -691,9 +704,11 @@ function docLinesHtml(doc) {
   (doc.type === 'inventory'
     ? '<div style="padding:8px 0"><button class="chip" onclick="openInvReport(' + doc.id +
       ')">📑 Отчёт о расхождениях</button></div>' : '') +
-  (doc.type === 'vydacha' && doc.print_url
+  (doc.print_url
     ? '<div style="padding:8px 0"><button class="chip" data-print="' + esc(doc.print_url) +
-      '">🖨 УПД — печать / PDF</button></div>' : '');
+      '">🖨 ' + (doc.type === 'opt' ? 'УПД'
+        : doc.type === 'vydacha' ? 'Акт на комиссию' : 'Отчёт комиссионера') +
+      ' — печать / PDF</button></div>' : '');
 }
 
 window.openInvReport = id => push(S_invReport, id);
@@ -1032,6 +1047,232 @@ async function S_skladView() {
     el.querySelectorAll('.prow').forEach(row => {
       row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
     });
+  });
+}
+
+// оптовая продажа: отгрузка покупателю по выбранному прайсу, на выходе — УПД
+async function S_optNew() {
+  const [products, plists] = await Promise.all([
+    getProducts(true), api('/api/pricelists'),
+  ]);
+  const lists = plists.lists;
+  let listId = SETTINGS.default_price_list || null;
+  let prices = {};
+  const loadPrices = async () => {
+    prices = listId ? (await api('/api/pricelists/' + listId)).list.prices : {};
+  };
+  await loadPrices();
+  const lines = [{ product: null, qty: '', price: '' }];
+  const html =
+    '<div class="grid2" style="margin-bottom:10px">' +
+    '<div class="field" style="margin:0"><label>Дата</label>' +
+    '<input type="date" id="op-date" value="' + today() + '"></div>' +
+    '<div class="field" style="margin:0"><label>Прайс</label><select id="op-list">' +
+    '<option value="">Базовые цены</option>' +
+    lists.map(l => '<option value="' + l.id + '"' + (l.id === listId ? ' selected' : '') +
+      '>' + esc(l.name) + '</option>').join('') + '</select></div></div>' +
+    '<div class="field"><label>Покупатель</label>' +
+    '<input id="op-buyer" placeholder="ИП Иванов И.И. / ООО «Ромашка»"></div>' +
+    '<div id="op-lines"></div>' +
+    '<button class="chip" id="op-more" style="margin-bottom:10px">+ Добавить позицию</button>' +
+    '<div class="card" id="op-total" hidden></div>';
+  const el = screen('Новая оптовая продажа', html, true);
+  infoTip(el, 'Отгрузка со склада оптовому покупателю. Цены берутся из выбранного ' +
+    'прайса (по умолчанию — из настроек), их можно поправить в строке. ' +
+    'После проведения открывается УПД для печати или сохранения в PDF.');
+  const bar = actionBar(el, [{ id: 'op-save', label: 'Провести и создать УПД', main: true }]);
+  const linesEl = el.querySelector('#op-lines');
+  const totals = () => {
+    let sum = 0, any = false;
+    lines.forEach(l => {
+      if (!l.product) return;
+      const q = pnum(l.qty);
+      if (q > 0) { any = true; sum += q * pnum(l.price); }
+    });
+    const t = el.querySelector('#op-total');
+    t.hidden = !any;
+    t.innerHTML = '<div class="row"><div class="l hint">Итого к оплате</div>' +
+      '<div class="r val">' + fmtM(sum) + '</div></div>';
+  };
+  const draw = focusIdx => {
+    linesEl.innerHTML = lines.map((l, i) => {
+      if (!l.product) return lineSearchHtml(i);
+      return '<div class="line"><div class="linehead"><div style="flex:1">' +
+        '<div class="name">' + (i + 1) + '. ' + esc(l.product.name) + '</div>' +
+        '<div class="sub hint small">склад ' + fmtQ(l.product.stock_qty, l.product.unit) +
+        '</div></div><button class="rm" data-i="' + i + '">✕</button></div>' +
+        '<div class="grid2"><div class="field" style="margin:0"><label>Кол-во</label>' +
+        '<input inputmode="decimal" class="qin" data-i="' + i + '" value="' +
+        esc(l.qty) + '"></div>' +
+        '<div class="field" style="margin:0"><label>Цена, ₽</label>' +
+        '<input inputmode="decimal" class="pin" data-i="' + i + '" value="' +
+        esc(l.price) + '"></div></div></div>';
+    }).join('');
+    totals();
+    if (focusIdx != null) {
+      const s = linesEl.querySelector('.lsearch[data-i="' + focusIdx + '"]');
+      if (s) s.focus();
+    }
+  };
+  draw();
+  el.querySelector('#op-list').onchange = async e => {
+    listId = e.target.value ? +e.target.value : null;
+    await loadPrices();
+    lines.forEach(l => {
+      if (l.product) l.price = String(prices[l.product.id] || l.product.retail_price || '');
+    });
+    draw();
+  };
+  linesEl.addEventListener('input', e => {
+    const i = +e.target.dataset.i;
+    if (e.target.classList.contains('qin')) { lines[i].qty = e.target.value; totals(); }
+    if (e.target.classList.contains('pin')) { lines[i].price = e.target.value; totals(); }
+  });
+  linesEl.addEventListener('click', e => {
+    const rm = e.target.closest('.rm');
+    if (rm) { lines.splice(+rm.dataset.i, 1); draw(); }
+  });
+  attachLineSearch(linesEl, lines, products, {
+    sub: p => 'склад ' + fmtQ(p.stock_qty, p.unit) + ' • ' +
+      fmtM(prices[p.id] || p.retail_price) + '/' + p.unit,
+    disabled: p => !(p.stock_qty > 0.0005),
+    pick: (i, p) => {
+      lines[i] = { product: p, qty: '',
+        price: String(prices[p.id] || p.retail_price || '') };
+      draw();
+      const q = linesEl.querySelector('.qin[data-i="' + i + '"]');
+      if (q) q.focus();
+    },
+  });
+  el.querySelector('#op-more').onclick = () => {
+    lines.push({ product: null, qty: '', price: '' });
+    draw(lines.length - 1);
+  };
+  bar.querySelector('#op-save').onclick = async () => {
+    const out = lines.filter(l => l.product).map(l => ({
+      product_id: l.product.id, qty: pnum(l.qty), price: pnum(l.price),
+    })).filter(l => l.qty > 0);
+    if (!out.length) return toast('Добавь позиции и количество');
+    const buyer = el.querySelector('#op-buyer').value.trim();
+    if (!buyer) return toast('Укажи покупателя — он попадёт в УПД');
+    try {
+      const r = await api('/api/docs/opt', 'POST', {
+        date: el.querySelector('#op-date').value, buyer, lines: out,
+        price_list_id: listId,
+      });
+      PRODUCTS_CACHE = null;
+      toast('Продажа проведена на ' + fmtM(r.doc.amount), true);
+      if (r.doc.print_url &&
+          await confirmDlg('Открыть УПД для печати или сохранения в PDF?')) {
+        openExternal(r.doc.print_url);
+      }
+      back();
+    } catch (e) { toast(e.message); }
+  };
+}
+
+// прайсы направлений: список, создание, удаление, прайс по умолчанию
+async function S_priceLists() {
+  const r = await api('/api/pricelists');
+  const def = SETTINGS.default_price_list || null;
+  const html =
+    '<div class="card">' + (r.lists.length ? r.lists.map(l =>
+      '<div class="row"><div class="l" data-open="' + l.id + '" style="flex:1;cursor:pointer">' +
+      '<div class="name small">' + esc(l.name) +
+      (l.id === def ? ' <span class="green">• по умолчанию</span>' : '') + '</div>' +
+      '<div class="sub">позиций с ценой: ' + l.items + '</div></div>' +
+      '<div class="r" style="display:flex;gap:6px;align-items:center">' +
+      '<button class="chip' + (l.id === def ? ' on' : '') + '" data-def="' + l.id +
+      '" title="Прайс по умолчанию">★</button>' +
+      '<button class="chip" data-del="' + l.id + '">🗑</button>' +
+      '<span class="dcarr" data-open="' + l.id + '">›</span></div></div>').join('')
+      : '<div class="hint">Прайсов пока нет</div>') + '</div>' +
+    '<div class="card"><div class="field" style="margin-bottom:8px">' +
+    '<label>Новый прайс</label>' +
+    '<input id="pl-new" placeholder="Например, Опт от 50 кг"></div>' +
+    '<button class="btn secondary" id="pl-add" style="margin:0">+ Создать прайс</button></div>';
+  const el = screen('Прайсы', html, true);
+  infoTip(el, 'Прайс — набор цен для направления продаж (опт, сеть, ярмарка). ' +
+    'Товары без цены в прайсе продаются по базовой цене из номенклатуры. ' +
+    '★ — прайс по умолчанию: он подставляется в выдачу и оптовую продажу.');
+  el.querySelector('#pl-add').onclick = async () => {
+    const name = el.querySelector('#pl-new').value.trim();
+    if (!name) return toast('Введи название прайса');
+    try {
+      await api('/api/pricelists', 'POST', { name });
+      toast('Прайс создан ✓', true);
+      render();
+    } catch (e) { toast(e.message); }
+  };
+  el.addEventListener('click', async e => {
+    const d = e.target.closest('[data-def]');
+    if (d) {
+      const id = +d.dataset.def;
+      try {
+        const rr = await api('/api/settings', 'PUT', {
+          share_pct: SETTINGS.share_pct, commission_pct: SETTINGS.commission_pct,
+          default_price_list: (SETTINGS.default_price_list === id) ? '' : id,
+        });
+        SETTINGS = rr.settings;
+        toast(SETTINGS.default_price_list ? 'Прайс по умолчанию ✓' : 'Сброшено', true);
+        render();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      if (!(await confirmDlg('Удалить прайс? Цены в нём будут потеряны.'))) return;
+      try {
+        await api('/api/pricelists/' + del.dataset.del, 'DELETE');
+        toast('Прайс удалён', true);
+        render();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    const op = e.target.closest('[data-open]');
+    if (op) push(S_priceListEdit, +op.dataset.open);
+  });
+}
+
+// цены внутри прайса
+async function S_priceListEdit(listId) {
+  const [products, resp] = await Promise.all([
+    getProducts(true), api('/api/pricelists/' + listId),
+  ]);
+  const prices = resp.list.prices;
+  const rows = groupedSheet(products.filter(p => !p.archived), (p, n) =>
+    '<div class="row prow" data-name="' + esc(p.name.toLowerCase()) + '">' +
+    '<div class="l" style="flex:1"><div class="name small">' + n + '. ' + esc(p.name) +
+    '</div><div class="sub">базовая ' + fmtM(p.retail_price) + '</div></div>' +
+    '<div class="r" style="display:flex;gap:6px;align-items:center">' +
+    '<input inputmode="decimal" class="pri" style="width:88px" data-pid="' + p.id +
+    '" data-old="' + (prices[p.id] || '') + '" value="' + (prices[p.id] || '') +
+    '" placeholder="базовая"><button class="chip psave" data-pid="' + p.id +
+    '" hidden>✓</button></div></div>');
+  const html =
+    '<div class="field"><input id="ple-q" placeholder="🔍 Поиск товара…"></div>' +
+    '<div class="card" id="ple-list">' + rows + '</div>';
+  const el = screen(resp.list.name, html, true);
+  infoTip(el, 'Задай цены этого направления. Пустая цена — товар продаётся по базовой ' +
+    'цене из номенклатуры.');
+  bindGroupedSheet(el, '#ple-list', '#ple-q');
+  el.addEventListener('input', e => {
+    if (!e.target.classList.contains('pri')) return;
+    const changed = pnum(e.target.value) !== pnum(e.target.dataset.old);
+    e.target.parentElement.querySelector('.psave').hidden = !changed;
+  });
+  el.addEventListener('click', async e => {
+    const b = e.target.closest('.psave');
+    if (!b) return;
+    const inp = b.parentElement.querySelector('.pri');
+    try {
+      await api('/api/pricelists/' + listId, 'PUT', {
+        product_id: +b.dataset.pid, price: pnum(inp.value),
+      });
+      inp.dataset.old = String(pnum(inp.value));
+      b.hidden = true;
+      toast('Цена сохранена ✓', true);
+    } catch (err) { toast(err.message); }
   });
 }
 
@@ -1516,12 +1757,14 @@ async function S_realiz() {
   const html = '<div id="rz-alert"></div>' + menuRows([
     ['vyd', 'arrowup', 'Выдать товар'],
     ['sd', 'arrowdown', 'Принять товар'],
+    ['opt', 'card', 'Оптовая продажа'],
     ['prices', 'tag', 'Управление ценами'],
   ]);
   const el = screen('', html);
   bindMenu(el, {
     vyd: () => push(S_vydachaList),
     sd: () => push(S_sdachaList),
+    opt: () => push(S_optList),
     prices: () => push(S_pricesList),
   });
   // совладельцу и админу — напоминание обработать расчёты с сотрудниками
@@ -1711,7 +1954,7 @@ async function S_vydacha(sid) {
       } else {
         toast('Выдано на ' + fmtM(r.doc.amount) + ', долг +' + fmtM(r.doc.money), true);
         if (r.doc.print_url &&
-            await confirmDlg('Открыть УПД для печати или сохранения в PDF?')) {
+            await confirmDlg('Открыть акт приёма-передачи на комиссию (печать / PDF)?')) {
           openExternal(r.doc.print_url);
         }
       }
@@ -3973,6 +4216,7 @@ const DOC_GROUPS = [
   ['draft', 'Черновики', null],
   ['prihod', 'Поступления', ['prihod', 'initial']],
   ['vydacha', 'Выдачи', ['vydacha', 'order']],
+  ['opt', 'Опт', ['opt']],
   ['sdacha', 'Приёмки', ['sdacha']],
   ['transfer', 'Передачи', ['transfer_out', 'transfer_in']],
   ['money', 'Деньги', ['incass', 'cash']],
@@ -4188,6 +4432,12 @@ async function S_settings() {
     '<input id="st-share" inputmode="decimal" value="' + r.settings.share_pct + '"></div>' +
     '<div class="field"><label>Комиссия терминала, %</label>' +
     '<input id="st-comm" inputmode="decimal" value="' + r.settings.commission_pct + '"></div>' +
+    '<div class="field"><label>Организация (для документов)</label>' +
+    '<input id="st-company" value="' + esc(r.settings.company || '') +
+    '" placeholder="ИП Карелин А. / ООО «Йоггу»"></div>' +
+    '<div class="field"><label>Реквизиты (ИНН, адрес, телефон)</label>' +
+    '<input id="st-req" value="' + esc(r.settings.company_req || '') +
+    '" placeholder="ИНН 1234567890, г. Ижевск, тел. +7…"></div>' +
     '<button class="btn" id="st-save">Сохранить</button>' +
     '';
   const el = screen('Настройки', html, true);
@@ -4197,6 +4447,8 @@ async function S_settings() {
       const rr = await api('/api/settings', 'PUT', {
         share_pct: pnum(el.querySelector('#st-share').value),
         commission_pct: pnum(el.querySelector('#st-comm').value),
+        company: el.querySelector('#st-company').value,
+        company_req: el.querySelector('#st-req').value,
       });
       SETTINGS = rr.settings;
       toast('Сохранено ✓', true);

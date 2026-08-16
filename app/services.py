@@ -48,10 +48,24 @@ def settings_get(conn):
     return {
         "share_pct": float(s.get("share_pct", 50)),
         "commission_pct": float(s.get("commission_pct", 2)),
+        # прайс по умолчанию подставляется в выдачу и оптовую продажу
+        "default_price_list": int(s["default_price_list"])
+        if (s.get("default_price_list") or "").isdigit() else None,
+        # реквизиты для печатных форм (УПД, акты)
+        "company": s.get("company", ""),
+        "company_req": s.get("company_req", ""),
     }
 
 
-def settings_set(conn, share_pct, commission_pct):
+def settings_set_kv(conn, key, value):
+    with _lock, conn:
+        conn.execute("INSERT OR REPLACE INTO settings(k, v) VALUES(?, ?)",
+                     (key, str(value)))
+    return settings_get(conn)
+
+
+def settings_set(conn, share_pct, commission_pct, default_price_list=None,
+                 company=None, company_req=None):
     share = _num(share_pct, "Доля, %", allow_zero=True)
     comm = _num(commission_pct, "Комиссия, %", allow_zero=True)
     if share > 100 or comm > 100:
@@ -59,6 +73,15 @@ def settings_set(conn, share_pct, commission_pct):
     with _lock, conn:
         conn.execute("INSERT OR REPLACE INTO settings(k, v) VALUES('share_pct', ?)", (str(share),))
         conn.execute("INSERT OR REPLACE INTO settings(k, v) VALUES('commission_pct', ?)", (str(comm),))
+        if default_price_list is not None:
+            conn.execute("INSERT OR REPLACE INTO settings(k, v) "
+                         "VALUES('default_price_list', ?)", (str(default_price_list or ""),))
+        if company is not None:
+            conn.execute("INSERT OR REPLACE INTO settings(k, v) VALUES('company', ?)",
+                         (str(company).strip(),))
+        if company_req is not None:
+            conn.execute("INSERT OR REPLACE INTO settings(k, v) VALUES('company_req', ?)",
+                         (str(company_req).strip(),))
     return settings_get(conn)
 
 
@@ -707,8 +730,10 @@ def inventory_set_lines(conn, user, doc_id, lines):
     return doc_get(conn, doc_id)
 
 
-def doc_vydacha(conn, user, seller_id, date, lines, share_pct, comment=None, post=True):
-    """Выдача товара продавцу под реализацию (со склада и/или с его полки)."""
+def doc_vydacha(conn, user, seller_id, date, lines, share_pct, comment=None, post=True,
+                list_id=None):
+    """Выдача товара продавцу под реализацию (со склада и/или с его полки).
+    Цены берутся из выбранного прайса, иначе — базовые из номенклатуры."""
     _date_ok(date)
     _need_lines(lines)
     _seller_checked(conn, seller_id)
@@ -723,11 +748,13 @@ def doc_vydacha(conn, user, seller_id, date, lines, share_pct, comment=None, pos
             qty = q_wh + q_shelf
             if qty < EPS:
                 raise ValueError(f"{p['name']}: укажите количество")
-            if p["retail_price"] < EPS:
+            price = price_of(conn, p, list_id)
+            if price < EPS:
                 raise ValueError(f"{p['name']}: не задана цена продажи — "
                                  "заполните её в номенклатуре перед выдачей")
-            _line_insert(conn, doc_id, p, qty=qty, qty_shelf=q_shelf)
-            total += qty * p["retail_price"]
+            _line_insert(conn, doc_id, p, qty=qty, qty_shelf=q_shelf,
+                         retail_price=r2(price))
+            total += qty * price
         money = total * share_pct / 100.0
         conn.execute("UPDATE docs SET amount=?, money=? WHERE id=?",
                      (r2(total), r2(money), doc_id))
@@ -845,6 +872,92 @@ def doc_transfer(conn, user, from_id, to_id, date, lines, share_pct, comment=Non
     return doc_get(conn, out_id)
 
 
+# ---------- прайс-листы (направления продаж) ----------
+
+def price_lists(conn):
+    out = []
+    for r in conn.execute("SELECT * FROM price_lists WHERE archived=0 ORDER BY id"):
+        n = conn.execute("SELECT COUNT(*) c FROM price_list_items WHERE list_id=?",
+                         (r["id"],)).fetchone()["c"]
+        out.append({"id": r["id"], "name": r["name"], "items": n})
+    return out
+
+
+def price_list_create(conn, name):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Укажите название прайса")
+    with _lock, conn:
+        cur = conn.execute("INSERT INTO price_lists(name) VALUES(?)", (name,))
+    return {"id": cur.lastrowid, "name": name, "items": 0}
+
+
+def price_list_delete(conn, list_id):
+    with _lock, conn:
+        conn.execute("DELETE FROM price_list_items WHERE list_id=?", (list_id,))
+        conn.execute("DELETE FROM price_lists WHERE id=?", (list_id,))
+    if str(settings_get(conn).get("default_price_list") or "") == str(list_id):
+        settings_set_kv(conn, "default_price_list", "")
+    return {"deleted": True}
+
+
+def price_list_get(conn, list_id):
+    r = conn.execute("SELECT * FROM price_lists WHERE id=?", (list_id,)).fetchone()
+    if r is None:
+        raise ValueError("Прайс не найден")
+    items = {x["product_id"]: x["price"] for x in conn.execute(
+        "SELECT product_id, price FROM price_list_items WHERE list_id=?", (list_id,))}
+    return {"id": r["id"], "name": r["name"], "prices": items}
+
+
+def price_list_set(conn, list_id, product_id, price):
+    if conn.execute("SELECT 1 FROM price_lists WHERE id=?", (list_id,)).fetchone() is None:
+        raise ValueError("Прайс не найден")
+    p = _num(price, "Цена", allow_zero=True)
+    with _lock, conn:
+        if p <= EPS:
+            conn.execute("DELETE FROM price_list_items WHERE list_id=? AND product_id=?",
+                         (list_id, product_id))
+        else:
+            conn.execute(
+                "INSERT INTO price_list_items(list_id, product_id, price) VALUES(?,?,?) "
+                "ON CONFLICT(list_id, product_id) DO UPDATE SET price=excluded.price",
+                (list_id, product_id, r2(p)))
+    return price_list_get(conn, list_id)
+
+
+def price_of(conn, product, list_id=None):
+    """Цена товара по прайсу; нет в прайсе — базовая цена продажи."""
+    if list_id:
+        r = conn.execute(
+            "SELECT price FROM price_list_items WHERE list_id=? AND product_id=?",
+            (list_id, product["id"])).fetchone()
+        if r and r["price"] > EPS:
+            return float(r["price"])
+    return float(product["retail_price"])
+
+
+def doc_opt(conn, user, date, lines, buyer=None, comment=None, list_id=None, post=True):
+    """Оптовая продажа со склада: отгрузка покупателю по выбранному прайсу."""
+    _date_ok(date)
+    _need_lines(lines)
+    with _lock, conn:
+        doc_id = _doc_insert(conn, "opt", date, user["id"], comment=comment)
+        conn.execute("UPDATE docs SET buyer=? WHERE id=?",
+                     ((buyer or "").strip() or None, doc_id))
+        total = 0.0
+        for ln in lines:
+            p = _product(conn, ln.get("product_id"))
+            qty = _num(ln.get("qty"), p["name"])
+            price = _num(ln.get("price", price_of(conn, p, list_id)), p["name"])
+            _line_insert(conn, doc_id, p, qty=qty, retail_price=r2(price))
+            total += qty * price
+        conn.execute("UPDATE docs SET amount=? WHERE id=?", (r2(total), doc_id))
+    if post:
+        post_doc(conn, user, doc_id)
+    return doc_get(conn, doc_id)
+
+
 def doc_order(conn, user, lines, comment=None):
     """Заявка продавца на подготовку товара: остатки не трогает, кладовщик
     получает уведомление и собирает заказ к выдаче."""
@@ -937,6 +1050,17 @@ def post_doc(conn, user, doc_id):
                 _seller_ret_set(conn, sid, pid, new_ret)
                 conn.execute("UPDATE doc_lines SET purchase_price=? WHERE id=?",
                              (r2(unit_cost), l["id"]))
+        elif t == "opt":
+            # оптовая отгрузка: товар уходит со склада покупателю
+            for l in d["lines"]:
+                pid = l["product_id"]
+                have = _stock_qty(conn, pid)
+                if l["qty"] > have + EPS:
+                    raise ValueError(f"{l['name']}: на складе только {have:g} {l['unit']}")
+                _stock_set(conn, pid, have - l["qty"])
+                cost = _fifo_out(conn, doc_id, pid, l["qty"], l["name"])
+                conn.execute("UPDATE doc_lines SET purchase_price=? WHERE id=?",
+                             (r2(cost / l["qty"] if l["qty"] > EPS else 0), l["id"]))
         elif t == "sdacha":
             sid = d["seller_id"]
             for l in d["lines"]:
@@ -1087,6 +1211,11 @@ def void_doc(conn, user, doc_id):
                 _sstock_set(conn, to_doc["seller_id"], pid, hands_t - l["qty"], shelf_t)
                 _sstock_set(conn, d["seller_id"], pid, hands_f + l["qty"], shelf_f)
             conn.execute("UPDATE docs SET status='void' WHERE id=?", (to_doc["id"],))
+        elif t == "opt":
+            for l in d["lines"]:
+                _stock_set(conn, l["product_id"],
+                           _stock_qty(conn, l["product_id"]) + l["qty"])
+                _fifo_in(conn, doc_id, l["product_id"], l["qty"], l["purchase_price"])
         elif t == "initial":
             raise ValueError("Начальные остатки нельзя отменить — исправьте инвентаризацией")
         elif t == "order":
