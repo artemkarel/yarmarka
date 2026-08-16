@@ -762,7 +762,9 @@ function attachProductSearch(el, products, opts) {
 
 // строки «сначала добавь строку — потом ищи позицию в ней»
 function lineSearchHtml(i, placeholder) {
+  // слева порядковый номер, на месте названия — строка поиска
   return '<div class="line"><div class="linehead">' +
+    '<div class="name" style="flex:none">' + (i + 1) + '.</div>' +
     '<input class="lsearch" data-i="' + i + '" placeholder="' +
     (placeholder || '🔍 Начни вводить название…') + '" autocomplete="off" style="flex:1">' +
     '<button class="rm" data-i="' + i + '">✕</button></div>' +
