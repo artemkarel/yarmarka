@@ -152,8 +152,10 @@ details.doc .doclines{ padding:0 14px 12px; }
 .pghead{ width:100%; display:flex; justify-content:space-between; align-items:center;
   border:none; background:transparent; color:var(--text); font-size:15.5px; font-weight:600;
   padding:12px 4px 6px; cursor:pointer; }
-.pgarr{ color:var(--hint); transition:transform .25s ease; }
-.pgroup.closed .pgarr{ transform:rotate(-90deg); }
+.pgarr{ display:inline-block; color:var(--text); opacity:.7; font-size:19px;
+  font-weight:800; line-height:1; transition:transform .25s ease;
+  transform:rotate(90deg); }
+.pgroup.closed .pgarr{ transform:rotate(0deg); }
 .pgbody{ display:grid; grid-template-rows:1fr; transition:grid-template-rows .28s ease; }
 .pgbody .pgin{ overflow:hidden; min-height:0; }
 .pgroup.closed .pgbody{ grid-template-rows:0fr; }

@@ -533,27 +533,6 @@ const ROW_ICONS = {
 
 // плавающие кнопки поверх длинных списков: ✕ — назад, ✓ — главное действие,
 // чтобы сохранить можно было в любой момент, не мотая список до низа
-function floatSave(el, mainSelector) {
-  const bar = document.createElement('div');
-  bar.className = 'fab-bar';
-  bar.innerHTML =
-    '<button class="fab fab-x" aria-label="Отмена">' +
-    '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"' +
-    ' stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>' +
-    '</button>' +
-    '<button class="fab fab-ok" aria-label="Сохранить">' +
-    '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor"' +
-    ' stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">' +
-    '<path d="m5 12.5 5 5L19.5 7"/></svg></button>';
-  // в body, не в #screen: у экрана will-change:transform, из-за него fixed
-  // позиционировался бы от экрана и кнопки уезжали бы в низ длинного списка
-  document.body.appendChild(bar);
-  bar.querySelector('.fab-x').onclick = () => back();
-  bar.querySelector('.fab-ok').onclick = () => {
-    const b = el.querySelector(mainSelector);
-    if (b) b.click();
-  };
-}
 
 function menuRows(items) {
   return '<div class="rowmenu">' + items.map(it =>
@@ -796,6 +775,40 @@ function attachProductSearch(el, products, opts) {
 }
 
 // строки «сначала добавь строку — потом ищи позицию в ней»
+// панель действий документа: живёт под шапкой, при прокрутке прилипает к верху
+// настоящей шапкой, при свайпе-назад едет вместе с экраном (см. sw.pin в свайпе)
+function actionBar(el, buttons) {
+  const bar = document.createElement('div');
+  bar.className = 'subact stickyact';
+  bar.innerHTML = buttons.map(b =>
+    '<button class="' + (b.main ? 'ta-main' : 'ta-sec') + '" id="' + b.id + '">' +
+    b.label + '</button>').join('');
+  const anchor = document.createElement('div');
+  bar._anchor = anchor;
+  const head = el.querySelector('.subhead');
+  if (head) head.after(bar); else el.prepend(bar);
+  bar.before(anchor);
+  const onScroll = () => {
+    if (!document.body.contains(anchor)) {
+      window.removeEventListener('scroll', onScroll);
+      if (bar.parentElement === document.body) bar.remove();
+      return;
+    }
+    const pin = anchor.getBoundingClientRect().top <= 0;
+    if (pin && bar.parentElement !== document.body) {
+      anchor.style.height = bar.offsetHeight + 'px'; // контент не дёргается
+      document.body.appendChild(bar);
+      bar.classList.add('pinned');
+    } else if (!pin && bar.parentElement === document.body) {
+      anchor.style.height = '0px';
+      anchor.after(bar);
+      bar.classList.remove('pinned');
+    }
+  };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  return bar;
+}
+
 // подсказка раздела: текст спрятан за значком ⓘ рядом с заголовком
 function infoTip(el, text) {
   const t = el.querySelector('.subtitle') || el.querySelector('.pagetitle');
@@ -837,7 +850,7 @@ function groupedSheet(products, rowFn) {
   let n = 0;
   return groups.map(g =>
     '<div class="pgroup"><button class="pghead">' + esc(g.name) +
-    '<span class="pgarr">▾</span></button>' +
+    '<span class="pgarr">›</span></button>' +
     '<div class="pgbody"><div class="pgin">' +
     g.items.map(p => rowFn(p, ++n)).join('') +
     '</div></div></div>').join('');
@@ -1039,18 +1052,18 @@ async function S_orderNew() {
     '</div>' +
     '<div class="field"><label>Комментарий (необязательно)</label>' +
     '<input id="or-comment" placeholder="Например: к пятнице, на ярмарку в Казань"></div>' +
-    '<button class="btn" id="or-send">Отправить заявку</button>';
+    '';
   const el = screen('Заявка на товар', html, true);
   infoTip(el, 'Укажи, сколько подготовить к выдаче. Кладовщик получит уведомление ' +
     'в мессенджер и соберёт заказ.');
-  floatSave(el, '#or-send');
+  const bar = actionBar(el, [{ id: 'or-send', label: 'Отправить заявку', main: true }]);
   el.querySelector('#or-q').addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
     el.querySelectorAll('.prow').forEach(row => {
       row.style.display = fuzzyMatch(q, row.dataset.name) ? '' : 'none';
     });
   });
-  el.querySelector('#or-send').onclick = async () => {
+  bar.querySelector('#or-send').onclick = async () => {
     const lines = [];
     el.querySelectorAll('.oin').forEach(inp => {
       const q = pnum(inp.value);
@@ -1167,7 +1180,8 @@ async function S_sklad() {
   const shelf = shelfSellers.length
     ? '<div class="card"><h3>🧺 На полках продавцов</h3>' + shelfSellers.map((s, i) =>
       '<details class="doc"><summary><div class="dochead"><div><b>' + (i + 1) + '. ' +
-      esc(s.name) + '</b></div><div class="dt">' + fmtM(s.shelf_value) + '</div></div>' +
+      esc(s.name) + '</b></div><div class="dt">' + fmtM(s.shelf_value) +
+      ' <span class="dcarr">›</span></div></div>' +
       '<div class="sub hint small">' + fmtQ(
         s.shelf.reduce((a, x) => a + (x.unit === 'кг' ? x.qty : 0), 0), 'кг') +
       ' • позиций: ' + s.shelf.length + '</div></summary>' +
@@ -1255,10 +1269,12 @@ async function S_prihod() {
     '<div id="pr-lines"></div>' +
     '<button class="chip" id="pr-more" style="margin-bottom:10px">+ Добавить позицию</button>' +
     '<div class="card" id="pr-total" hidden></div>' +
-    '<button class="btn" id="pr-save">Провести поступление</button>' +
-    '<button class="btn secondary" id="pr-draft">💾 Сохранить черновик</button>';
+    '';
   const el = screen('Новое поступление', html, true);
-  floatSave(el, '#pr-save');
+  const bar = actionBar(el, [
+    { id: 'pr-draft', label: '💾 Черновик' },
+    { id: 'pr-save', label: 'Провести', main: true },
+  ]);
   const linesEl = el.querySelector('#pr-lines');
   supplierDropdown(el, sup, id => { supplierId = id; });
 
@@ -1351,8 +1367,8 @@ async function S_prihod() {
       back();
     } catch (e) { toast(e.message); }
   };
-  el.querySelector('#pr-save').onclick = () => saveProc(false);
-  el.querySelector('#pr-draft').onclick = () => saveProc(true);
+  bar.querySelector('#pr-save').onclick = () => saveProc(false);
+  bar.querySelector('#pr-draft').onclick = () => saveProc(true);
 }
 
 // инвентаризация как процесс: Ведомость (черновик) → Подсчёт → Проведение,
@@ -1362,8 +1378,7 @@ async function S_invStart() {
   const r = await api('/api/docs?type=inventory&limit=30');
   const draft = r.docs.find(d => d.status === 'draft');
   const html =
-    // при черновике кнопки нет — в подсчёт проваливаются тапом по карточке
-    (draft ? '' : '<button class="btn" id="inv-go">+ Новая инвентаризация</button>') +
+    '<button class="btn" id="inv-go">+ Создать инвентаризацию</button>' +
     (r.docs.length
       ? '<div class="shsec" style="margin:14px 4px 8px">📚 Последние инвентаризации</div>' +
         r.docs.map(d => docCard(d, true, false)).join('')
@@ -1372,7 +1387,10 @@ async function S_invStart() {
   const el = screen('Инвентаризация', html, true);
   const go = el.querySelector('#inv-go');
   if (go) go.onclick = async () => {
-    if (!(await confirmDlg('Создать новую ведомость инвентаризации?'))) return;
+    const q = draft
+      ? 'Есть незавершённая ведомость от ' + dstr(draft.date) + '. Создать ещё одну?'
+      : 'Создать новую ведомость инвентаризации?';
+    if (!(await confirmDlg(q))) return;
     try {
       const created = await api('/api/docs/inventory', 'POST', { lines: [] });
       toast('Создана ведомость — вноси подсчёт', true);
@@ -1405,40 +1423,16 @@ async function S_invCount(docId) {
     p.id + '" value="' + (facts[p.id] != null ? facts[p.id] : '') +
     '" placeholder="факт"></div></div>');
   const html =
-    '<div class="subact stickyact" id="ic-actions">' +
-    '<button class="ta-sec" id="ic-save">Сохранить</button>' +
-    '<button class="ta-main" id="ic-post">Провести</button></div>' +
     '<div class="field"><input id="ic-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card" id="ic-list">' + rows + '</div>';
   const el = screen('Инвентаризация', html, true);
   infoTip(el, 'Ведомость №' + docId + ' (черновик). Считай в несколько заходов: вноси ' +
     'факты и жми «Сохранить». Остатки не меняются до проведения. Пустые поля при ' +
     'проведении не трогаются.');
-  // при прокрутке заголовок уезжает, а кнопки прилипают к верху экрана.
-  // position:sticky внутри #screen не работает (will-change:transform свайпа),
-  // поэтому прилипание честное: панель переносится в body как fixed
-  const bar = el.querySelector('#ic-actions');
-  const anchor = document.createElement('div');
-  bar._anchor = anchor; // для возврата панели в поток при свайпе-назад
-  bar.before(anchor);
-  const onScroll = () => {
-    if (!document.body.contains(anchor)) {
-      window.removeEventListener('scroll', onScroll);
-      if (bar.parentElement === document.body) bar.remove();
-      return;
-    }
-    const pin = anchor.getBoundingClientRect().top <= 0;
-    if (pin && bar.parentElement !== document.body) {
-      anchor.style.height = bar.offsetHeight + 'px'; // контент не дёргается
-      document.body.appendChild(bar);
-      bar.classList.add('pinned');
-    } else if (!pin && bar.parentElement === document.body) {
-      anchor.style.height = '0px';
-      anchor.after(bar);
-      bar.classList.remove('pinned');
-    }
-  };
-  window.addEventListener('scroll', onScroll, { passive: true });
+  const bar = actionBar(el, [
+    { id: 'ic-save', label: 'Сохранить' },
+    { id: 'ic-post', label: 'Провести', main: true },
+  ]);
   bindGroupedSheet(el, '#ic-list', '#ic-q');
   const collect = () => {
     const lines = [];
@@ -1487,12 +1481,12 @@ async function S_countSheet(kind) {
     '<div class="field"><input id="cs-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card" id="cs-list">' + (rows || '<div class="hint">Номенклатура пуста</div>') +
     '</div>' +
-    '<button class="btn" id="cs-save">' + (isInv ? 'Провести инвентаризацию' : 'Сохранить остатки') +
-    '</button>';
+    '';
   const el = screen(isInv ? 'Инвентаризация' : 'Начальные остатки', html, true);
-  floatSave(el, '#cs-save');
+  const bar = actionBar(el, [{ id: 'cs-save', main: true,
+    label: isInv ? 'Провести' : 'Сохранить' }]);
   bindGroupedSheet(el, '#cs-list', '#cs-q');
-  el.querySelector('#cs-save').onclick = async () => {
+  bar.querySelector('#cs-save').onclick = async () => {
     const lines = [];
     el.querySelectorAll('.fin').forEach(inp => {
       if (inp.value.trim() !== '') lines.push({ product_id: +inp.dataset.pid, qty: pnum(inp.value) });
@@ -1628,10 +1622,12 @@ async function S_vydacha(sid) {
     '<div id="v-lines"></div>' +
     '<button class="chip" id="v-more" style="margin-bottom:10px">+ Добавить позицию</button>' +
     '<div class="card" id="v-total" hidden></div>' +
-    '<button class="btn" id="v-save">Выдать товар</button>' +
-    '<button class="btn secondary" id="v-draft">💾 Сохранить черновик</button>';
+    '';
   const el = screen('Выдача: ' + info.seller.name, html, true);
-  floatSave(el, '#v-save');
+  const bar = actionBar(el, [
+    { id: 'v-draft', label: '💾 Черновик' },
+    { id: 'v-save', label: 'Выдать', main: true },
+  ]);
   const linesEl = el.querySelector('#v-lines');
 
   const totals = () => {
@@ -1722,8 +1718,8 @@ async function S_vydacha(sid) {
       back();
     } catch (e) { toast(e.message); }
   };
-  el.querySelector('#v-save').onclick = () => saveVyd(false);
-  el.querySelector('#v-draft').onclick = () => saveVyd(true);
+  bar.querySelector('#v-save').onclick = () => saveVyd(false);
+  bar.querySelector('#v-draft').onclick = () => saveVyd(true);
   draw();
 }
 
@@ -1752,10 +1748,10 @@ async function S_sdacha(sid) {
     '<div class="field"><label>Дата</label><input type="date" id="s-date" value="' + today() + '"></div>' +
     rows +
     '<div class="card" id="s-total"></div>' +
-    '<button class="btn" id="s-save">Принять сдачу</button>';
+    '';
   const el = screen('Сдача: ' + info.seller.name, html, true);
   infoTip(el, 'Впиши, сколько вернулось на склад и на полку — «продано» посчитается само. Если что-то остаётся у продавца на руках, уменьши «продано».');
-  floatSave(el, '#s-save');
+  const bar = actionBar(el, [{ id: 's-save', label: 'Принять сдачу', main: true }]);
   const touched = {};
 
   const totals = () => {
@@ -1786,7 +1782,7 @@ async function S_sdacha(sid) {
     }
     totals();
   });
-  el.querySelector('#s-save').onclick = async () => {
+  bar.querySelector('#s-save').onclick = async () => {
     const lines = [];
     let bad = null;
     hands.forEach((h, i) => {
@@ -1869,11 +1865,11 @@ async function S_transfer(fromSid) {
     others.map(s => '<option value="' + s.id + '">' + esc(s.name) + '</option>').join('') +
     '</select></div>' +
     '<div class="card">' + rows + '</div>' +
-    '<button class="btn" id="tr-save">Передать</button>';
+    '';
   const el = screen('Передача: ' + info.seller.name, html, true);
   infoTip(el, 'Товар и долг за него переедут к получателю. Оба получат уведомление в мессенджер.');
-  floatSave(el, '#tr-save');
-  el.querySelector('#tr-save').onclick = async () => {
+  const bar = actionBar(el, [{ id: 'tr-save', label: 'Передать', main: true }]);
+  bar.querySelector('#tr-save').onclick = async () => {
     const lines = [];
     let bad = null;
     el.querySelectorAll('.tr-q').forEach(inp => {
@@ -1973,7 +1969,7 @@ async function S_analytics() {
   const t = sales.totals;
   const sellersHtml = sales.sellers.length ? sales.sellers.map(s =>
     '<details class="doc"><summary><div class="dochead"><div><b>' + esc(s.name) + '</b></div>' +
-    '<div class="dt">' + fmtM(s.sold_value) + '</div></div>' +
+    '<div class="dt">' + fmtM(s.sold_value) + ' <span class="dcarr">›</span></div></div>' +
     '<div class="sub hint small">' +
     (s.sold_kg > 0 ? fmtQ(s.sold_kg, 'кг') + ' • ' : '') +
     'наша доля ' + fmtM(s.our_share) + ' • терминал ' + fmtM(s.terminal_credit) +
@@ -2199,7 +2195,7 @@ async function S_repSellers() {
   const rep = await api('/api/analytics/sales?date_from=' + p.from + '&date_to=' + p.to);
   const rows = rep.sellers.length ? rep.sellers.map(s =>
     '<details class="doc"><summary><div class="dochead"><div><b>' + esc(s.name) + '</b></div>' +
-    '<div class="dt">' + fmtM(s.sold_value) + '</div></div>' +
+    '<div class="dt">' + fmtM(s.sold_value) + ' <span class="dcarr">›</span></div></div>' +
     '<div class="sub hint small">' +
     (s.sold_kg > 0 ? fmtQ(s.sold_kg, 'кг') + ' • ' : '') +
     'наша доля ' + fmtM(s.our_share) + ' • терминал ' + fmtM(s.terminal_credit) +
@@ -3680,7 +3676,7 @@ async function S_products() {
   });
   const listHtml = groups.map(g =>
     '<div class="pgroup"><button class="pghead">' + esc(g.name) +
-    '<span class="pgarr">▾</span></button>' +
+    '<span class="pgarr">›</span></button>' +
     '<div class="pgbody"><div class="pgin">' + g.items.map(rowP).join('') +
     '</div></div></div>').join('');
   const html =
