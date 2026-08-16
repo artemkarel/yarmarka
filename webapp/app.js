@@ -198,7 +198,8 @@ function screen(title, html, sub) {
   const el = old.cloneNode(false);
   old.replaceWith(el);
   // плавающие панели живут в body — чистим при смене экрана
-  document.querySelectorAll('.fab-bar, .chatbar, .citypop, .cpbg').forEach(n => n.remove());
+  document.querySelectorAll('.fab-bar, .chatbar, .citypop, .cpbg, .topact')
+    .forEach(n => n.remove());
   const head = sub
     ? '<div class="subhead"><button class="backbtn" onclick="back()">‹</button>' +
       '<div class="subtitle">' + esc(title) + '</div></div>'
@@ -1292,10 +1293,15 @@ async function S_invCount(docId) {
     'Пустые поля при проведении не трогаются.</div>' +
     '<div class="field"><input id="ic-q" placeholder="🔍 Поиск товара…"></div>' +
     '<div class="card" id="ic-list">' + rows + '</div>' +
-    '<button class="btn secondary" id="ic-save">💾 Сохранить подсчёт</button>' +
-    '<button class="btn" id="ic-post">Провести ведомость</button>';
+    '';
   const el = screen('Инвентаризация', html, true);
-  floatSave(el, '#ic-save'); // ✓ сохраняет подсчёт; проведение — кнопкой внизу
+  // «Сохранить» и «Провести» закреплены сверху справа — видны в любом месте списка
+  const bar = document.createElement('div');
+  bar.className = 'topact';
+  bar.innerHTML =
+    '<button class="ta-sec" id="ic-save" title="Сохранить подсчёт">💾</button>' +
+    '<button class="ta-main" id="ic-post">Провести</button>';
+  document.body.appendChild(bar);
   bindGroupedSheet(el, '#ic-list', '#ic-q');
   const collect = () => {
     const lines = [];
@@ -1306,7 +1312,7 @@ async function S_invCount(docId) {
     });
     return lines;
   };
-  el.querySelector('#ic-save').onclick = async () => {
+  bar.querySelector('#ic-save').onclick = async () => {
     const lines = collect();
     if (!lines.length) return toast('Внеси хотя бы один факт');
     try {
@@ -1314,7 +1320,7 @@ async function S_invCount(docId) {
       toast('Подсчёт сохранён (' + lines.length + ' поз.) ✓', true);
     } catch (e) { toast(e.message); }
   };
-  el.querySelector('#ic-post').onclick = async () => {
+  bar.querySelector('#ic-post').onclick = async () => {
     const lines = collect();
     if (!lines.length) return toast('Сначала внеси подсчёт');
     if (!(await confirmDlg('Провести ведомость (' + lines.length + ' поз.)? Система создаст ' +
