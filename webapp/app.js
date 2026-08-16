@@ -198,7 +198,7 @@ function screen(title, html, sub) {
   const el = old.cloneNode(false);
   old.replaceWith(el);
   // плавающие панели живут в body — чистим при смене экрана
-  document.querySelectorAll('.fab-bar, .chatbar, .citypop, .cpbg, .topact')
+  document.querySelectorAll('.fab-bar, .chatbar, .citypop, .cpbg, .topact, body > .stickyact')
     .forEach(n => n.remove());
   const head = sub
     ? '<div class="subhead"><button class="backbtn" onclick="back()">‹</button>' +
@@ -1373,21 +1373,39 @@ async function S_invCount(docId) {
     p.id + '" value="' + (facts[p.id] != null ? facts[p.id] : '') +
     '" placeholder="факт"></div></div>');
   const html =
+    '<div class="subact stickyact" id="ic-actions">' +
+    '<button class="ta-sec" id="ic-save">Сохранить</button>' +
+    '<button class="ta-main" id="ic-post">Провести</button></div>' +
     '<div class="field"><input id="ic-q" placeholder="🔍 Поиск товара…"></div>' +
-    '<div class="card" id="ic-list">' + rows + '</div>' +
-    '';
+    '<div class="card" id="ic-list">' + rows + '</div>';
   const el = screen('Инвентаризация', html, true);
   infoTip(el, 'Ведомость №' + docId + ' (черновик). Считай в несколько заходов: вноси ' +
     'факты и жми «Сохранить». Остатки не меняются до проведения. Пустые поля при ' +
     'проведении не трогаются.');
-  // кнопки живут в шапке; шапка липкая — видна в любом месте списка
-  const shead = el.querySelector('.subhead');
-  shead.classList.add('sticky');
-  shead.insertAdjacentHTML('beforeend',
-    '<div class="subact">' +
-    '<button class="ta-sec" id="ic-save">Сохранить</button>' +
-    '<button class="ta-main" id="ic-post">Провести</button></div>');
-  const bar = shead;
+  // при прокрутке заголовок уезжает, а кнопки прилипают к верху экрана.
+  // position:sticky внутри #screen не работает (will-change:transform свайпа),
+  // поэтому прилипание честное: панель переносится в body как fixed
+  const bar = el.querySelector('#ic-actions');
+  const anchor = document.createElement('div');
+  bar.before(anchor);
+  const onScroll = () => {
+    if (!document.body.contains(anchor)) {
+      window.removeEventListener('scroll', onScroll);
+      if (bar.parentElement === document.body) bar.remove();
+      return;
+    }
+    const pin = anchor.getBoundingClientRect().top <= 0;
+    if (pin && bar.parentElement !== document.body) {
+      anchor.style.height = bar.offsetHeight + 'px'; // контент не дёргается
+      document.body.appendChild(bar);
+      bar.classList.add('pinned');
+    } else if (!pin && bar.parentElement === document.body) {
+      anchor.style.height = '0px';
+      anchor.after(bar);
+      bar.classList.remove('pinned');
+    }
+  };
+  window.addEventListener('scroll', onScroll, { passive: true });
   bindGroupedSheet(el, '#ic-list', '#ic-q');
   const collect = () => {
     const lines = [];

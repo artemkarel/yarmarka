@@ -313,11 +313,17 @@ body.sheet-open{ overflow:hidden; }
 .cprow .ck{ color:var(--accent); font-weight:800; }
 .cpfoot{ display:flex; gap:8px; margin-top:12px; }
 .cpfoot .btn{ flex:1; padding:11px; }
-/* липкая шапка с действиями (инвентаризация): кнопки видны в любом месте списка */
-.subhead.sticky{ position:sticky; z-index:35; background:var(--bg);
-  top:0; margin:0 0 10px; padding:10px 0; flex-wrap:wrap; }
-/* заголовок целиком, кнопки — строкой ниже */
-.subact{ flex-basis:100%; display:flex; gap:8px; margin-top:10px; }
+/* кнопки действий: при прокрутке прилипают к верху, заголовок уезжает */
+.subact{ display:flex; gap:8px; }
+.subact.stickyact{ margin:0 0 12px; padding:8px 0; }
+.subact.stickyact.pinned{ position:fixed; left:12px; right:12px; z-index:45;
+  top:calc(var(--tg-safe-area-inset-top, 0px) +
+    var(--tg-content-safe-area-inset-top, 0px));
+  background:var(--bg); padding:8px 0 10px;
+  box-shadow:0 10px 22px -10px rgba(0,0,0,.3);
+  animation:pinin .25s ease; }
+@keyframes pinin{ from{ transform:translateY(-12px); opacity:.5; }
+  to{ transform:translateY(0); opacity:1; } }
 .subact button{ flex:1; border:none; border-radius:11px; padding:11px 12px;
   font-size:14px; font-weight:700; cursor:pointer; transition:transform .12s ease; }
 .subact button:active{ transform:scale(.94); }
