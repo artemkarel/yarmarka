@@ -209,8 +209,8 @@ details.doc .doclines{ padding:0 14px 12px; }
 .infoico{ color:var(--accent); margin-left:6px; font-size:14px; opacity:.85; }
 .tipico{ border:none; background:transparent; color:var(--accent); font-size:16px;
   margin-left:7px; cursor:pointer; padding:0; vertical-align:2px; }
-.dcarr{ display:inline-block; color:var(--hint); font-size:12px; margin-left:6px;
-  transition:transform .2s ease; }
+.dcarr{ display:inline-block; color:var(--hint); font-size:17px; font-weight:700;
+  padding:8px 10px; margin:-8px -6px -8px 2px; transition:transform .2s ease; }
 details[open] > summary .dcarr{ transform:rotate(180deg); }
 .telbtn{ border:none; background:transparent; color:var(--accent); font-weight:700;
   font-size:inherit; cursor:pointer; padding:0; text-decoration:underline; }

@@ -1330,18 +1330,16 @@ async function S_invStart() {
   const r = await api('/api/docs?type=inventory&limit=30');
   const draft = r.docs.find(d => d.status === 'draft');
   const html =
-    (draft
-      ? '<button class="btn" id="inv-go">Продолжить подсчёт от ' + dstr(draft.date) +
-        '</button>'
-      : '<button class="btn" id="inv-go">+ Новая инвентаризация</button>') +
+    // при черновике кнопки нет — в подсчёт проваливаются тапом по карточке
+    (draft ? '' : '<button class="btn" id="inv-go">+ Новая инвентаризация</button>') +
     (r.docs.length
       ? '<div class="shsec" style="margin:14px 4px 8px">📚 Последние инвентаризации</div>' +
         r.docs.map(d => docCard(d, true, false)).join('')
       : '<div class="card hint">Инвентаризаций ещё не было. Создай первую — система ' +
         'сверит подсчёт с учётом и сама оформит недостачи и излишки.</div>');
   const el = screen('Инвентаризация', html, true);
-  el.querySelector('#inv-go').onclick = async () => {
-    if (draft) { push(S_invCount, draft.id); return; }
+  const go = el.querySelector('#inv-go');
+  if (go) go.onclick = async () => {
     if (!(await confirmDlg('Создать новую ведомость инвентаризации?'))) return;
     try {
       const created = await api('/api/docs/inventory', 'POST', { lines: [] });
