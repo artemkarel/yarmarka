@@ -1025,7 +1025,7 @@ async function S_sklad() {
     '</div>' + shelf;
   const el = screen('', html);
   bindMenu(el, {
-    prihod: () => push(S_prihod),
+    prihod: () => push(S_prihodList),
     transfer: () => push(S_transferPick),
     products: () => push(S_products),
     inv: () => push(S_invStart),
@@ -1069,6 +1069,19 @@ async function S_chooseSeller(mode) {
   });
 }
 
+async function S_prihodList() {
+  // вход в поступления: сначала список ранее созданных документов
+  const r = await api('/api/docs?type=prihod&limit=30');
+  const html =
+    '<button class="btn" id="ph-new">+ Создать поступление</button>' +
+    (r.docs.length
+      ? '<div class="shsec" style="margin:14px 4px 8px">📚 Поступления</div>' +
+        r.docs.map(d => docCard(d, true, false)).join('')
+      : '<div class="card hint">Поступлений ещё не было — создай первое кнопкой сверху.</div>');
+  const el = screen('Поступление товара', html, true);
+  el.querySelector('#ph-new').onclick = () => push(S_prihod);
+}
+
 async function S_prihod() {
   const products = await getProducts(true);
   const sup = (await api('/api/suppliers')).suppliers;
@@ -1085,11 +1098,9 @@ async function S_prihod() {
     '<button class="chip" id="pr-more" style="margin-bottom:10px">+ Добавить позицию</button>' +
     '<div class="card" id="pr-total" hidden></div>' +
     '<button class="btn" id="pr-save">Провести поступление</button>' +
-    '<button class="btn secondary" id="pr-draft">💾 Сохранить черновик</button>' +
-    '<div id="hist"></div>';
-  const el = screen('Поступление товара', html, true);
+    '<button class="btn secondary" id="pr-draft">💾 Сохранить черновик</button>';
+  const el = screen('Новое поступление', html, true);
   floatSave(el, '#pr-save');
-  histBlock(el, 'prihod');
   const linesEl = el.querySelector('#pr-lines');
   supplierDropdown(el, sup, id => { supplierId = id; });
 
